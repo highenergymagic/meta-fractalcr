@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "revision": "03cf2ec06a5d302f23af811744f6bcea49988bfb",
+  "requested": [
+    "golang.org/x/net@v0.60.0",
+    "go.opentelemetry.io/otel/sdk@v1.45.0",
+    "github.com/containerd/containerd@v1.7.36"
+  ],
+  "toolchain": "go version go1.26.10 linux/amd64",
+  "patch_sha256": "8ec7615fb9f5252edb5cbc9808dccf5a09644a8110ae77ef43a74dd0c779f6cd",
+  "modules_txt_sha256": "4c074a1cfc4637e8849ac738fe3af289b362166d811d5f94808787f8d1de6076",
+  "vendor_archive_sha256": "1b63badd72f3f4127be31aaa90063e71fe11634e539173883dfc5db2741c5807"
+}

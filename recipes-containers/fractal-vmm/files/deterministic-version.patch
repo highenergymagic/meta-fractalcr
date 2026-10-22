@@ -1,0 +1,29 @@
+Subject: [PATCH] Report the pinned release and distribution suffix deterministically
+
+Upstream-Status: Inappropriate [distribution build metadata]
+
+The build uses a reviewed commit and local dependency patch. Git tag availability
+in a fetch cache must not change the resulting executable's version string.
+
+--- a/cloud-hypervisor/build.rs
++++ b/cloud-hypervisor/build.rs
+@@ -4,19 +4,9 @@
+ //
+ 
+ use std::env;
+-use std::process::Command;
+ 
+ fn main() {
+     let mut version = "v".to_owned() + env!("CARGO_PKG_VERSION");
+-
+-    if let Ok(git_out) = Command::new("git").args(["describe", "--dirty"]).output()
+-        && git_out.status.success()
+-        && let Ok(git_out_str) = String::from_utf8(git_out.stdout)
+-    {
+-        version = git_out_str;
+-        // Pop the trailing newline.
+-        version.pop();
+-    }
+ 
+     // Append CH_EXTRA_VERSION to version if it is set.
+     if let Ok(extra_version) = env::var("CH_EXTRA_VERSION") {

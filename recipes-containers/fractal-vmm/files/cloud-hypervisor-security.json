@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "revision": "038ce5a72d761380a02f714a4eb4ca63e0ea073d",
+  "cargo": "cargo 1.99.1 (5f94df478 2026-08-27)",
+  "cargo_lock_sha256": "ef38c479cbb9736999fa0320c25b4402dfc2af7303bf8c328c7fef033ff45ec9",
+  "patch_sha256": "63c9c8abf3d54b9ab7a1723c993a523d33afed055f770cfe9876a48aa007c520",
+  "vendor_archive_sha256": "54f98ef11ddfec243ea42117dca4389d2f288157533093389c8c16e50d1df599"
+}

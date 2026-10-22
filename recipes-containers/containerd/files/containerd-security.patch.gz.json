@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "revision": "991ca6a8ca58b47346a42093210099e090bc6c1f",
+  "requested": [
+    "golang.org/x/net@v0.60.0",
+    "golang.org/x/crypto@v0.58.0",
+    "golang.org/x/sys@v0.49.0",
+    "golang.org/x/text@v0.43.0",
+    "github.com/cilium/ebpf@v0.22.0",
+    "github.com/moby/sys/user@v0.4.1",
+    "github.com/moby/spdystream@v0.5.1",
+    "github.com/go-jose/go-jose/v4@v4.1.4",
+    "google.golang.org/grpc@v1.83.1",
+    "go.opentelemetry.io/otel@v1.45.0",
+    "go.opentelemetry.io/otel/sdk@v1.45.0",
+    "go.opentelemetry.io/otel/exporters/otlp/otlptrace@v1.45.0",
+    "go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc@v1.45.0",
+    "go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp@v1.45.0"
+  ],
+  "toolchain": "go version go1.26.10 linux/amd64",
+  "patch_sha256": "dbfd8990691937b4c1d3be7b54b5cfcfbe09a4583274930abcd4bab5b7e20d8c",
+  "modules_txt_sha256": "6e3f604080950dfdf779027a25f0bac6b63a4fe3c0d4be5c1df6ae7465a9e072"
+}

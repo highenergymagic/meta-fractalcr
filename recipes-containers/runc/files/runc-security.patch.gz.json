@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "revision": "29dd3dc2b13b4123162e5fe132504bb4b15569f1",
+  "requested": [
+    "github.com/cilium/ebpf@v0.22.0",
+    "golang.org/x/net@v0.60.0",
+    "golang.org/x/sys@v0.49.0"
+  ],
+  "toolchain": "go version go1.26.10 linux/amd64",
+  "patch_sha256": "532dc9967088eba0b3ea0330da283515621c185741cfc0bb80dd546d3d8cf852",
+  "modules_txt_sha256": "ded39666c2f2f218527209e09ac1a47e49cb96d4d87eca3091b55c9a588e20e3"
+}

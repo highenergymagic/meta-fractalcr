@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "revision": "0dbe87f36ed472fe36b6796c3f70b4210a731fc5",
+  "requested": [
+    "golang.org/x/net@v0.60.0",
+    "github.com/moby/go-archive@v0.3.0"
+  ],
+  "toolchain": "go version go1.26.10 linux/amd64",
+  "patch_sha256": "cb927f058e1127e87b0c9d7e21266fde3b499eeb23ba7eb6a86ad7a3972a103c",
+  "modules_txt_sha256": "adfeb3c42ab8ee458f11c393018684596daf2300410b10e9109b8389ff46293f"
+}

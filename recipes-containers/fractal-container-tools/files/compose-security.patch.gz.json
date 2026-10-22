@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "revision": "6cbc19a3fd59e305fb814dca4d854a4fb67d2941",
+  "requested": [
+    "golang.org/x/net@v0.60.0"
+  ],
+  "toolchain": "go version go1.26.10 linux/amd64",
+  "patch_sha256": "f2516caa216828110df6c237f9c1896aef84385580d546d4f9859c8b24a61cbc",
+  "modules_txt_sha256": "7f88066a83aa825c84ce3170066d213f6fed7f75ea918b2ab0f5062681d37b8a",
+  "vendor_archive_sha256": "400dc2d47e7a3d95ddfc151422639fc1cc97df5130cea43c79f9bc2e13a726f4"
+}

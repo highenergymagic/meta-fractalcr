@@ -1,0 +1,11 @@
+SRCREV = "29dd3dc2b13b4123162e5fe132504bb4b15569f1"
+RUNC_VERSION = "1.5.2"
+FILESEXTRAPATHS:prepend := "${THISDIR}/files:"
+# Upstream release-1.5 includes the fd-based /dev hardening backport.
+SRC_URI:remove = "file://CVE-2026-41579.patch"
+SRC_URI += "file://runc-security.patch.gz;patchdir=src/import"
+export GOPROXY = "off"
+export GOSUMDB = "off"
+export GOTOOLCHAIN = "local"
+export GOFLAGS = "-mod=vendor -buildvcs=false"
+EXTRA_OEMAKE += "VERSION=${RUNC_VERSION} COMMIT=${SRCREV}"
