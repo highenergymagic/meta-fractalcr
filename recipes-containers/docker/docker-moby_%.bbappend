@@ -30,3 +30,6 @@ do_compile() {
 do_install:append() {
     rm -f ${D}${sysconfdir}/init.d/docker.init
 }
+
+# The appliance uses linked API clients, not the separately installed CLI.
+DOCKER_UNIFIED_PACKAGE = "False"

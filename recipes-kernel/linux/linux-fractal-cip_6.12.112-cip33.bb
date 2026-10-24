@@ -22,6 +22,21 @@ KERNEL_EXTRA_ARGS += "LOADADDR="
 ERROR_QA:append = " patch-fuzz"
 FCR_KERNEL_SECURITY_DIR := "${THISDIR}/files"
 
+# This appliance always boots a bundled kernel. The generic kernel class only
+# publishes .initramfs when it first backed up an existing plain kernel. An
+# interrupted build can leave that plain image absent, allowing a subsequent
+# successful compile to deploy an old .initramfs. Publish the newly compiled
+# image unconditionally; no unbundled boot image is needed here.
+do_bundle_initramfs() {
+    copy_initramfs
+    use_alternate_initrd=CONFIG_INITRAMFS_SOURCE=${B}/usr/${INITRAMFS_IMAGE_NAME}.cpio
+    kernel_do_compile
+    for imageType in ${KERNEL_IMAGETYPE_FOR_MAKE}; do
+        install -m 0644 ${B}/${KERNEL_OUTPUT_DIR}/$imageType ${B}/${KERNEL_OUTPUT_DIR}/$imageType.initramfs.new
+        mv -f ${B}/${KERNEL_OUTPUT_DIR}/$imageType.initramfs.new ${B}/${KERNEL_OUTPUT_DIR}/$imageType.initramfs
+    done
+}
+
 python do_unpack:append() {
     import gzip, hashlib, json
     from pathlib import Path
@@ -55,7 +70,7 @@ do_configure:append() {
     for feature in CC_OPTIMIZE_FOR_PERFORMANCE CGROUPS CGROUP_BPF MEMCG SWAP BINFMT_MISC NAMESPACES USER_NS SECCOMP_FILTER \
         OVERLAY_FS BTRFS_FS VETH BRIDGE NETFILTER EFI_STUB KVM VHOST_VSOCK \
         TUN NET_SCH_INGRESS NET_CLS_U32 NET_ACT_MIRRED MACVTAP VXLAN IP_VS \
-        IP_VS_RR IP_VS_PROTO_TCP IP_VS_PROTO_UDP XFRM_USER INET_ESP NETFILTER_XT_MARK NETFILTER_XT_MATCH_BPF \
+        IP_VS_RR IP_VS_PROTO_TCP IP_VS_PROTO_UDP XFRM_USER INET_ESP NETFILTER_XT_MARK NETFILTER_XT_MATCH_BPF NETFILTER_XT_MATCH_OWNER \
         IP6_NF_FILTER IP6_NF_NAT IP6_NF_MANGLE IP6_NF_RAW IP6_NF_TARGET_MASQUERADE \
         SLAB_FREELIST_RANDOM SLAB_FREELIST_HARDENED HARDENED_USERCOPY FORTIFY_SOURCE \
         INIT_ON_ALLOC_DEFAULT_ON LIST_HARDENED SECURITY_DMESG_RESTRICT BPF_UNPRIV_DEFAULT_OFF; do

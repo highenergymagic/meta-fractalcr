@@ -8,10 +8,10 @@ IMAGE_FSTYPES = "cpio.gz"
 # kernel.bbclass looks for INITRAMFS_IMAGE_NAME.cpio.gz without .rootfs.
 IMAGE_NAME_SUFFIX = ""
 IMAGE_LINGUAS = ""
-PACKAGE_INSTALL = "base-files base-passwd glibc busybox ca-certificates \
-    fractal-init docker-moby containerd runc iptables iptables-modules iproute2 \
-    btrfs-tools util-linux-mount util-linux-blkid fractal-kata fractal-container-tools \
-    os-release git openssh-ssh openssh-scp openssh-sftp"
+PACKAGE_INSTALL = "base-files base-passwd glibc ca-certificates \
+    fractal-init busybox docker-moby containerd runc iptables iptables-modules iproute2 \
+    fractal-storage fractal-kata fractal-container-tools fractal-blockstore \
+    os-release git openssh-ssh openssh-scp openssh-sftp chrony"
 IMAGE_ROOTFS_EXTRA_SPACE = "0"
 IMAGE_ROOTFS_SIZE = "0"
 IMAGE_OVERHEAD_FACTOR = "1.0"
@@ -28,3 +28,7 @@ fractal_bootstrap_devices() {
     test -c ${IMAGE_ROOTFS}/dev/console || mknod -m 0600 ${IMAGE_ROOTFS}/dev/console c 5 1
     test -c ${IMAGE_ROOTFS}/dev/null || mknod -m 0666 ${IMAGE_ROOTFS}/dev/null c 1 3
 }
+
+# Backend implementations may use their own internal helpers. The appliance
+# command boundary uses native APIs; helper availability is not an interactive
+# shell affordance. Do not strip interpreters or reject backend helper scripts.

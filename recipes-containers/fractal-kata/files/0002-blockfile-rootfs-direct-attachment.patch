@@ -1,0 +1,91 @@
+From: FractalCR <build@fractalcr.invalid>
+Subject: [PATCH] runtime: attach blockfile root filesystems without host mounting
+
+Avoid simultaneous host and guest ext4 ownership for containerd blockfile roots.
+Upstream-Status: Pending
+
+--- a/src/runtime/pkg/containerd-shim-v2/create.go
++++ b/src/runtime/pkg/containerd-shim-v2/create.go
+@@ -347,6 +347,10 @@
+ 	if len(r.Rootfs) == 1 {
+ 		m := r.Rootfs[0]
+ 
++		if virtcontainers.IsBlockFileRootFS(virtcontainers.RootFs{Source: m.Source, Type: m.Type, Options: m.Options}) && !s.config.HypervisorConfig.DisableBlockDeviceUse {
++			return false, nil
++		}
++
+ 		// Plug the block backed rootfs directly instead of mounting it.
+ 		if katautils.IsBlockDevice(m.Source) && !s.config.HypervisorConfig.DisableBlockDeviceUse {
+ 			return false, nil
+--- a/src/runtime/virtcontainers/container.go
++++ b/src/runtime/virtcontainers/container.go
+@@ -1895,6 +1895,9 @@
+ // hotplugDrive will attempt to hotplug the container rootfs if it is backed by a
+ // block device
+ func (c *Container) hotplugDrive(ctx context.Context) error {
++	if IsBlockFileRootFS(c.rootFs) {
++		return c.attachBlockFileRootfs(ctx)
++	}
+ 	var dev device
+ 	var err error
+ 
+--- /dev/null
++++ b/src/runtime/virtcontainers/rootfs_blockfile.go
+@@ -0,0 +1,36 @@
++// Copyright 2026 FractalCR contributors.
++// SPDX-License-Identifier: Apache-2.0
++
++package virtcontainers
++
++import (
++    "context"
++    "fmt"
++    "os"
++    "path/filepath"
++)
++
++// IsBlockFileRootFS recognizes the ext4 raw-file mount contract emitted by
++// containerd's blockfile snapshotter. Never mount it on the host while a guest
++// owns the filesystem. Symbolic links and already-mounted roots are excluded.
++func IsBlockFileRootFS(root RootFs) bool {
++    if root.Mounted || root.Type != "ext4" || !HasOption(root.Options, "loop") { return false }
++    st, err := os.Lstat(root.Source)
++    return err == nil && st.Mode().IsRegular()
++}
++
++func (c *Container) attachBlockFileRootfs(ctx context.Context) error {
++    if !c.checkBlockDeviceSupport(ctx) { return fmt.Errorf("blockfile rootfs requires block device support") }
++    info, err := c.createDeviceInfo(c.rootFs.Source, filepath.Join(kataGuestSharedDir(), c.id), HasOption(c.rootFs.Options, "ro"), true)
++    if err != nil { return err }
++    if info == nil { return fmt.Errorf("invalid blockfile rootfs") }
++    device, err := c.sandbox.devManager.NewDevice(*info)
++    if err != nil { return err }
++    if err = c.sandbox.devManager.AttachDevice(ctx, device.DeviceID(), c.sandbox); err != nil {
++        _ = c.sandbox.devManager.RemoveDevice(device.DeviceID())
++        return err
++    }
++    c.state.BlockDeviceID = device.DeviceID()
++    c.rootfsSuffix = ""
++    return c.setStateFstype(c.rootFs.Type)
++}
+--- /dev/null
++++ b/src/runtime/virtcontainers/rootfs_blockfile_test.go
+@@ -0,0 +1,18 @@
++// Copyright 2026 FractalCR contributors.
++// SPDX-License-Identifier: Apache-2.0
++package virtcontainers
++import ("os"; "path/filepath"; "testing")
++func TestBlockFileRootFSContract(t *testing.T) {
++    dir:=t.TempDir(); file:=filepath.Join(dir,"disk"); link:=filepath.Join(dir,"link")
++    if err:=os.WriteFile(file,[]byte("fixture"),0600); err!=nil {t.Fatal(err)}
++    if err:=os.Symlink(file,link); err!=nil {t.Fatal(err)}
++    for _, tc:=range []struct{root RootFs; want bool}{
++        {RootFs{Source:file,Type:"ext4",Options:[]string{"loop","rw"}},true},
++        {RootFs{Source:file,Type:"ext4",Options:[]string{"loop","ro"}},true},
++        {RootFs{Source:file,Type:"ext4",Options:[]string{"loop"},Mounted:true},false},
++        {RootFs{Source:link,Type:"ext4",Options:[]string{"loop"}},false},
++        {RootFs{Source:dir,Type:"ext4",Options:[]string{"loop"}},false},
++        {RootFs{Source:file,Type:"ext4"},false},
++        {RootFs{Source:file,Type:"overlay",Options:[]string{"loop"}},false},
++    } { if got:=IsBlockFileRootFS(tc.root); got!=tc.want {t.Fatalf("%+v: %v",tc.root,got)} }
++}

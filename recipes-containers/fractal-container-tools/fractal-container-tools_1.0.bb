@@ -33,14 +33,8 @@ INSANE_SKIP:${PN} += "already-stripped"
 
 do_compile() {
     install -d ${B}/bin
-    cd ${S}/compose
-    go build -ldflags="-buildid= -X github.com/docker/compose/v5/internal.Version=v5.6.1" \
-        -o ${B}/bin/docker-compose ./cmd
-    cd ${S}/buildx
-    go build -ldflags="-buildid= -X github.com/docker/buildx/version.Version=v0.38.1 -X github.com/docker/buildx/version.Revision=${SRCREV_buildx}" \
-        -o ${B}/bin/docker-buildx ./cmd/buildx
     cd ${S}/buildkit
-    for program in buildctl buildkitd; do
+    for program in buildkitd; do
         go build -ldflags="-buildid= -X github.com/moby/buildkit/version.Version=v0.34.1 -X github.com/moby/buildkit/version.Revision=${SRCREV_buildkit}" \
             -o ${B}/bin/$program ./cmd/$program
     done
@@ -52,8 +46,7 @@ do_compile() {
 
 do_install() {
     install -d ${D}${libdir}/docker/cli-plugins ${D}${bindir} ${D}${datadir}/fractal
-    install -m 0755 ${B}/bin/docker-compose ${B}/bin/docker-buildx ${D}${libdir}/docker/cli-plugins/
-    install -m 0755 ${B}/bin/buildctl ${B}/bin/buildkitd ${B}/bin/buildkit-cni-* ${D}${bindir}/
+    install -m 0755 ${B}/bin/buildkitd ${B}/bin/buildkit-cni-* ${D}${bindir}/
     install -m 0755 ${S}/qemu/bin/buildkit-qemu-* ${D}${bindir}/
     ln -s runc ${D}${bindir}/buildkit-runc
     printf 'compose=5.6.1\nbuildx=0.38.1\nbuildkit=0.34.1\ncni=1.9.1\n' > ${D}${datadir}/fractal/container-tools.versions

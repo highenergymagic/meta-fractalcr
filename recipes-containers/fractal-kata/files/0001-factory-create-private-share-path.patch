@@ -1,0 +1,26 @@
+From: FractalCR <build@fractalcr.invalid>
+Subject: [PATCH] runtime: prepare factory sandbox staging directory without shared fs
+
+CLH does not create a shared filesystem directory when shared_fs is none.
+VM assignment still links the sandbox staging directory to that path; ensure
+the target exists so filesystem preparation does not encounter a dangling link.
+
+Upstream-Status: Pending
+---
+ src/runtime/virtcontainers/vm.go | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/src/runtime/virtcontainers/vm.go b/src/runtime/virtcontainers/vm.go
+--- a/src/runtime/virtcontainers/vm.go
++++ b/src/runtime/virtcontainers/vm.go
+@@ -352,6 +352,10 @@ func (v *VM) assignSandbox(s *Sandbox) error {
+ 	os.RemoveAll(sbSharePath)
+ 	os.RemoveAll(sbSockDir)
+ 
++	if err := os.MkdirAll(vmSharePath, DirMode); err != nil {
++		return err
++	}
++
+ 	if err := os.Symlink(vmSharePath, sbSharePath); err != nil {
+ 		return err
+ 	}

@@ -14,6 +14,7 @@
 #include <sys/stat.h>
 #include <sys/utsname.h>
 #include <unistd.h>
+#include <time.h>
 
 static void require(int value, const char *message)
 {
@@ -83,6 +84,43 @@ static int request(const char *host, const char *port)
 
 int main(int argc, char **argv)
 {
+    if (argc == 2 && !strcmp(argv[1], "ntp-state")) {
+        FILE *f = fopen("/state/drift", "r");
+        require(f != NULL, "persistent NTP drift file exists");
+        double frequency, skew;
+        require(fscanf(f, "%lf %lf", &frequency, &skew) == 2, "NTP drift state is readable");
+        fclose(f);
+        printf("NTP_PERSISTENT_STATE_OK %.3f %.3f\n", frequency, skew);
+        return 0;
+    }
+    if ((argc == 2 || argc == 3) && !strcmp(argv[1], "factory-state")) {
+        const char *path = argc == 3 ? argv[2] : "/factory-state";
+        int fd = open(path, O_RDWR | O_CREAT, 0600);
+        require(fd >= 0, "factory state open");
+        unsigned long long count = 0;
+        ssize_t n = read(fd, &count, sizeof(count));
+        require(n == 0 || n == sizeof(count), "factory state read");
+        count++;
+        require(pwrite(fd, &count, sizeof(count), 0) == sizeof(count), "factory state write");
+        require(fsync(fd) == 0, "factory state sync");
+        close(fd);
+        unsigned char random[32];
+        fd = open("/dev/urandom", O_RDONLY);
+        require(fd >= 0 && read(fd, random, sizeof(random)) == sizeof(random), "factory randomness");
+        close(fd);
+        printf("FACTORY_STATE=%llu\nFACTORY_RANDOM=", count);
+        for (size_t i = 0; i < sizeof(random); i++) printf("%02x", random[i]);
+        struct timespec now;
+        require(clock_gettime(CLOCK_REALTIME, &now) == 0, "factory wall clock");
+        printf("\nWALL_CLOCK=%lld.%09ld\n", (long long)now.tv_sec, now.tv_nsec);
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "clock")) {
+        struct timespec now;
+        require(!clock_gettime(CLOCK_REALTIME, &now), "wall clock");
+        printf("WALL_CLOCK=%lld.%09ld\n", (long long)now.tv_sec, now.tv_nsec);
+        return 0;
+    }
     if (argc==2 && !strcmp(argv[1],"identity")) {
         struct utsname identity; require(!uname(&identity),"kernel identity");
         printf("KERNEL=%s\nPID=%d\n",identity.release,getpid()); return 0;

@@ -8,6 +8,8 @@
 #include <fcntl.h>
 #include <json-c/json.h>
 #include <net/if.h>
+#include <linux/btrfs.h>
+#include <sys/ioctl.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
@@ -27,7 +29,7 @@
 #include "control.h"
 #include <unistd.h>
 
-static int mount_ok = 1, configured;
+static int mount_ok = 1;
 static char mount_errors[2048];
 static volatile sig_atomic_t stopping;
 static void stop_signal(int sig) { (void)sig; stopping = 1; }
@@ -77,29 +79,6 @@ static void link_path(const char *target, const char *path)
     }
 }
 
-static int run(char *const args[], unsigned timeout)
-{
-    pid_t child = fork();
-    if (child < 0) return -1;
-    if (!child) {
-        int null = open("/dev/null", O_RDONLY);
-        if (null < 0 || dup2(null, 0) < 0) _exit(126);
-        close(null);
-        execvp(args[0], args); perror(args[0]); _exit(127);
-    }
-    long long end = monotonic_ms() + timeout * 1000LL;
-    int status;
-    while (monotonic_ms() < end) {
-        if (waitpid(child, &status, WNOHANG) == child)
-            return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
-        usleep(100000);
-    }
-    kill(child, SIGKILL);
-    while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
-    puts("% Child operation timed out.");
-    return -1;
-}
-
 static int text_file(const char *path, const char *text)
 {
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0644);
@@ -142,8 +121,15 @@ static void mounts(void)
     text_file("/proc/sys/kernel/printk", "0 4 0 0\n");
     directory("/run/log", 0700);
     log_append("/run/log/platform.log", mount_errors, strlen(mount_errors));
-    char *loopback[] = {"ip", "link", "set", "lo", "up", NULL};
-    run(loopback, 5);
+    int netfd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    struct ifreq loopback = {0};
+    strcpy(loopback.ifr_name, "lo");
+    if (netfd < 0 || ioctl(netfd, SIOCGIFFLAGS, &loopback)) mount_ok = 0;
+    else {
+        loopback.ifr_flags |= IFF_UP;
+        if (ioctl(netfd, SIOCSIFFLAGS, &loopback)) mount_ok = 0;
+    }
+    if (netfd >= 0) close(netfd);
 }
 
 static int mount_data(void)
@@ -154,8 +140,25 @@ static int mount_data(void)
         struct statfs st;
         return !statfs(data, &st) && (unsigned long)st.f_type == 0x9123683EUL ? 0 : -1;
     }
-    char *scan[] = {"btrfs", "device", "scan", NULL};
-    run(scan, 15);
+    /* Register every member before mounting: multi-device Btrfs cannot mount
+     * until its devices have been presented to the kernel together. */
+    int control = open("/dev/btrfs-control", O_RDWR | O_CLOEXEC);
+    DIR *devices = opendir("/sys/class/block");
+    if (control < 0 || !devices) {
+        if (control >= 0) close(control);
+        if (devices) closedir(devices);
+        return -1;
+    }
+    struct dirent *member;
+    while ((member = readdir(devices))) {
+        if (member->d_name[0] == '.') continue;
+        struct btrfs_ioctl_vol_args scan = {0};
+        snprintf(scan.name, sizeof(scan.name), "/dev/%s", member->d_name);
+        /* Non-Btrfs devices are expected and do not stop discovery. */
+        ioctl(control, BTRFS_IOC_SCAN_DEV, &scan);
+    }
+    closedir(devices);
+    close(control);
     for (int retry = 0; retry < 30; retry++) {
         DIR *d = opendir("/sys/class/block");
         struct dirent *entry;
@@ -191,94 +194,6 @@ static int mount_data(void)
     return -1;
 }
 
-static const char *string_value(json_object *object, const char *key)
-{
-    json_object *v;
-    return json_object_object_get_ex(object, key, &v) && json_object_is_type(v, json_type_string) ?
-           json_object_get_string(v) : NULL;
-}
-
-static int address_ok(const char *text)
-{
-    struct in_addr a;
-    return text && inet_pton(AF_INET, text, &a) == 1;
-}
-
-static int configure(int network_only)
-{
-    if (!network_only) {
-        char *prepare[] = {"/usr/libexec/fractal-management", "prepare", NULL};
-        if (run(prepare, 15)) return -1;
-    }
-    const char *path = "/run/startup-config.json";
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
-    if (fd < 0 && errno == ENOENT && !network_only) {
-        if (sethostname("ctr", 3)) { perror("sethostname"); return -1; }
-        puts("No startup-config; using hostname ctr with no external IP configuration.");
-        return text_file("/run/startup-config.json", "{\"version\":1,\"hostname\":\"ctr\"}\n");
-    }
-    struct stat st;
-    char buf[65537];
-    ssize_t n = -1;
-    if (fd >= 0 && !fstat(fd, &st) && S_ISREG(st.st_mode) && st.st_size > 0 && st.st_size <= 65536)
-        n = read(fd, buf, (size_t)st.st_size);
-    if (fd >= 0) close(fd);
-    if (n <= 0 || n != st.st_size) { puts("% Cannot read startup-config."); return -1; }
-    buf[n] = 0;
-    json_tokener *tokener = json_tokener_new();
-    json_tokener_set_flags(tokener, JSON_TOKENER_STRICT);
-    json_object *root = json_tokener_parse_ex(tokener, buf, (int)n);
-    size_t end = json_tokener_get_parse_end(tokener);
-    int valid = json_tokener_get_error(tokener) == json_tokener_success;
-    while (end < (size_t)n && isspace((unsigned char)buf[end])) end++;
-    json_tokener_free(tokener);
-    json_object *version = NULL, *net = NULL;
-    const char *hostname = root ? string_value(root, "hostname") : NULL;
-    if (!valid || end != (size_t)n || !root || !json_object_is_type(root, json_type_object) ||
-        !json_object_object_get_ex(root, "version", &version) ||
-        !json_object_is_type(version, json_type_int) || json_object_get_int(version) != 1 ||
-        !hostname || !*hostname || strlen(hostname) > 63) goto invalid;
-    for (const char *c = hostname; *c; c++)
-        if (!isalnum((unsigned char)*c) && *c != '-') goto invalid;
-    if (json_object_object_get_ex(root, "network", &net)) {
-        if (!json_object_is_type(net, json_type_object)) goto invalid;
-        const char *nic = string_value(net, "interface"), *address = string_value(net, "address");
-        const char *gateway = string_value(net, "gateway"), *dns = string_value(net, "dns");
-        char ip[64], cidr[64], *slash, *tail;
-        if (!nic || !*nic || strlen(nic) >= IF_NAMESIZE || !if_nametoindex(nic) ||
-            !address || strlen(address) >= sizeof(ip)) goto invalid;
-        strcpy(ip, address); slash = strchr(ip, '/');
-        if (!slash) goto invalid;
-        *slash++ = 0;
-        long prefix = strtol(slash, &tail, 10);
-        if (!*slash || *tail || prefix < 1 || prefix > 32 || !address_ok(ip) ||
-            (gateway && !address_ok(gateway)) || (dns && !address_ok(dns))) goto invalid;
-        if (network_only) {
-        snprintf(cidr, sizeof(cidr), "%s", address);
-        char *up[] = {"ip", "link", "set", (char *)nic, "up", NULL};
-        char *addr[] = {"ip", "address", "replace", cidr, "dev", (char *)nic, NULL};
-        if (run(up, 5) || run(addr, 5)) goto invalid;
-        if (gateway) {
-            char *route[] = {"ip", "route", "replace", "default", "via", (char *)gateway, "dev", (char *)nic, NULL};
-            if (run(route, 5)) goto invalid;
-        }
-        if (dns) {
-            char resolv[64]; snprintf(resolv, sizeof(resolv), "nameserver %s\n", dns);
-            if (text_file("/run/resolv.conf", resolv)) goto invalid;
-        }
-        printf("Configured %s on %s from JSON startup-config.\n", address, nic);
-        }
-    }
-    if (!network_only && (sethostname(hostname, strlen(hostname)) || text_file("/run/startup-config.json", buf))) goto invalid;
-    printf("Startup configuration loaded: hostname %s.\n", hostname);
-    json_object_put(root);
-    return 0;
-invalid:
-    json_object_put(root);
-    puts("% Invalid/unsupported startup-config or network failure; Docker remains stopped.");
-    return -1;
-}
-
 static int freeze_root(void)
 {
     /* Change only the root bind mount created before the runtime/data mounts;
@@ -304,25 +219,8 @@ static int container_config(void)
         "\"features\":{\"containerd-snapshotter\":false},\"log-driver\":\"local\"}\n");
 }
 
-static void network_stop(void)
-{
-    json_object *root = json_object_from_file("/run/startup-config.json"), *net = NULL;
-    if (root && json_object_object_get_ex(root, "network", &net)) {
-        const char *nic = string_value(net, "interface"), *address = string_value(net, "address");
-        const char *gateway = string_value(net, "gateway");
-        if (nic && address) {
-            if (gateway) {
-                char *route[] = {"ip", "route", "del", "default", "via", (char *)gateway, "dev", (char *)nic, NULL};
-                run(route, 3);
-            }
-            char *addr[] = {"ip", "address", "del", (char *)address, "dev", (char *)nic, NULL};
-            run(addr, 3);
-        }
-    }
-    json_object_put(root); text_file("/run/resolv.conf", "");
-}
 extern int platform_console(void);
-extern int syslog_receiver(const char *,const char *);
+extern int syslog_receiver(const char *, const char *);
 static int container_engine_service(void)
 {
     /* The root is exempt from cgroup v2's no-internal-process rule. Dockerd
@@ -337,31 +235,8 @@ static int container_engine_service(void)
         access("/sys/fs/cgroup/fractal-engine/memory.swap.max", F_OK)) {
         perror("engine swap accounting"); return 1;
     }
-    execlp("dockerd", "dockerd", "--config-file=/run/docker-daemon.json", (char *)NULL);
+    execl("/usr/bin/dockerd", "dockerd", "--config-file=/run/docker-daemon.json", (char *)NULL);
     perror("dockerd"); return 1;
-}
-static int buildkit_service(void)
-{
-    pid_t child=fork();
-    if (child<0) return 1;
-    if (!child) {
-        execlp("buildkitd","buildkitd","--root=/datastore/data0/buildkit",
-            "--addr=unix:///run/buildkit/buildkitd.sock","--containerd-worker=false",
-            "--oci-worker=true","--oci-worker-snapshotter=overlayfs",
-            "--oci-worker-net=bridge","--oci-worker-binary=/usr/libexec/fractal-buildkit-runc",(char *)NULL);
-        _exit(127);
-    }
-    int status=0, ready=0;
-    for (int attempt=0;attempt<30 && !stopping;attempt++) {
-        if (waitpid(child,&status,WNOHANG)==child) return 1;
-        char *probe[]={"buildctl","--addr=unix:///run/buildkit/buildkitd.sock","--timeout=2","debug","workers",NULL};
-        if (!run(probe,3)) { ready=1; break; }
-        sleep(1);
-    }
-    if (!ready) { kill(child,SIGTERM); return 1; }
-    service_notify();
-    while (waitpid(child,&status,0)<0 && errno==EINTR) {}
-    return stopping ? 0 : 1;
 }
 int main(int argc, char **argv)
 {
@@ -372,25 +247,17 @@ int main(int argc, char **argv)
     if (!strcmp(argv[1], "syslog")) return syslog_receiver("/dev/log","/run/log/syslog.log");
     if (!strcmp(argv[1], "container-engine")) return container_engine_service();
     signal(SIGTERM, stop_signal); signal(SIGINT, stop_signal);
-    if (!strcmp(argv[1],"buildkit")) return buildkit_service();
     if (!strcmp(argv[1], "platform")) {
         mounts();
         if (!mount_ok || container_config() || freeze_root()) return 1;
     } else if (!strcmp(argv[1], "datastore")) {
         if (mount_data()) return 1;
-    } else if (!strcmp(argv[1], "configuration")) {
-        if (configure(0)) return 1;
-        configured = 1;
-    } else if (!strcmp(argv[1], "networking")) {
-        if (configure(1)) { network_stop(); return 1; }
     } else return 2;
     service_notify();
     while (!stopping) { struct timespec delay = {.tv_nsec=100000000}; nanosleep(&delay, NULL); }
-    if (!strcmp(argv[1], "networking")) network_stop();
     if (!strcmp(argv[1], "datastore")) {
         sync();
         if (umount(data)) { perror("datastore unmount"); return 1; }
     }
-    if (configured) unlink("/run/startup-config.json");
     return 0;
 }

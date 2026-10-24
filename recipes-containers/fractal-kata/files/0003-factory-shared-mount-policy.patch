@@ -1,0 +1,52 @@
+From: FractalCR <build@fractalcr.invalid>
+Subject: [PATCH] shim: preserve shared mount semantics when a template is enabled
+
+Use a fresh isolated VM for containers requiring a shared host filesystem.
+Upstream-Status: Pending
+
+--- a/src/runtime/pkg/containerd-shim-v2/create.go
++++ b/src/runtime/pkg/containerd-shim-v2/create.go
+@@ -106,6 +106,14 @@
+ 	runtimeConfig, err := loadRuntimeConfig(s, r)
+ 	if err != nil {
+ 		return nil, err
++	}
++
++	if runtimeConfig.FactoryConfig.Template && runtimeConfig.HypervisorConfig.SharedFS == "none" && !factoryEligibleRoot(ociSpec, rootFs) {
++		// Host bind mounts need a live shared filesystem. Preserve their
++		// semantics with a fresh Kata VM, never a copied writable directory.
++		runtimeConfig.FactoryConfig.Template = false
++		runtimeConfig.HypervisorConfig.SharedFS = "virtio-fs"
++		shimLog.Info("VM template bypassed for shared host filesystem mounts")
+ 	}
+ 
+ 	switch containerType {
+--- /dev/null
++++ b/src/runtime/pkg/containerd-shim-v2/factory_policy.go
+@@ -0,0 +1,26 @@
++// Copyright 2026 FractalCR contributors.
++// SPDX-License-Identifier: Apache-2.0
++package containerdshim
++
++import (
++    "github.com/kata-containers/kata-containers/src/runtime/virtcontainers"
++    specs "github.com/opencontainers/runtime-spec/specs-go"
++    "strings"
++    "encoding/hex"
++)
++
++func factoryEligibleRoot(spec *specs.Spec, root virtcontainers.RootFs) bool {
++    if !virtcontainers.IsBlockFileRootFS(root) { return false }
++    for _, m := range spec.Mounts {
++        bind:=m.Type=="bind" || virtcontainers.HasOption(m.Options,"bind") || virtcontainers.HasOption(m.Options,"rbind")
++        if !bind { continue }
++        // These Engine-owned files are generated afresh for each container;
++        // all application mounts retain shared-filesystem semantics.
++        if m.Destination!="/etc/hosts" && m.Destination!="/etc/hostname" && m.Destination!="/etc/resolv.conf" { return false }
++        relative:=strings.TrimPrefix(m.Source,"/datastore/data0/docker/containers/")
++        id, file, ok:=strings.Cut(relative,"/")
++        if !ok || len(id)!=64 || file!=strings.TrimPrefix(m.Destination,"/etc/") { return false }
++        if _,err:=hex.DecodeString(id); err!=nil { return false }
++    }
++    return true
++}

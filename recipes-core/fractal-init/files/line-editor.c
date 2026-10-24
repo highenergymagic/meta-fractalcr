@@ -118,6 +118,7 @@ enum edit_action editor_feed(struct line_editor *e, unsigned char c) {
         return EDIT_REDRAW;
     }
     if (c==4) {
+        if (!e->length) return EDIT_EOF;
         if (e->cursor==e->length) return EDIT_BELL;
         erase(e,e->cursor,e->cursor+1,0); return EDIT_REDRAW;
     }

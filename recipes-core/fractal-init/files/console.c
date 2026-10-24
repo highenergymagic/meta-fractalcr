@@ -1,8 +1,11 @@
+#include "release.h"
 /* SPDX-License-Identifier: MIT -- restartable serial console; never PID 1. */
 #define _GNU_SOURCE
 #include "control.h"
+#include "platform-info.h"
 #include "line-editor.h"
 #include <errno.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <json-c/json.h>
 #include <poll.h>
@@ -68,8 +71,8 @@ static void native_execute(json_object *arguments)
     char *argv[257];
     for (size_t i=0;i<count;i++) argv[i]=(char *)json_object_get_string(json_object_array_get_idx(arguments,i));
     argv[count]=NULL;
-    if (strcmp(argv[0],"/usr/bin/docker") && strcmp(argv[0],"/usr/bin/buildctl")) {
-        puts("% Invalid native program."); return;
+    if (strcmp(argv[0],"/usr/libexec/fractal-workload")) {
+        puts("% Invalid workload service."); return;
     }
     struct termios term;
     if (tcgetattr(0,&term)) return;
@@ -87,7 +90,7 @@ static void native_execute(json_object *arguments)
         setenv("BUILDKIT_HOST","unix:///run/buildkit/buildkitd.sock",1);
         setenv("TERM","vt100",1);
         if (chdir("/datastore/data0/projects")) { perror("Datastore workspace"); _exit(126); }
-        execv(argv[0],argv); perror("Native client"); _exit(127);
+        execv(argv[0],argv); puts("% Workload service is unavailable."); _exit(127);
     }
     struct termios stream_term=console_term;
     stream_term.c_oflag &= ~OPOST;
@@ -126,7 +129,7 @@ static void native_execute(json_object *arguments)
 static void prompt(void)
 {
     if (challenged) { printf("%s%s",auth_prompt,secret_input?"":input_line); return; }
-    if (gethostname(hostname, sizeof(hostname)-1)) strcpy(hostname, "ctr");
+    if (gethostname(hostname, sizeof(hostname))) strcpy(hostname, "ctr");
     size_t prefix=strlen(hostname)+strlen(mode_suffix);
     size_t width=terminal_width>prefix+4 ? terminal_width-prefix-3 : 8;
     if (input_length<=width) view_start=0;
@@ -191,8 +194,7 @@ static void filtered_reply(json_object *reply,json_object *filter)
 }
 static void management(const char *line)
 {
-    if (!strcmp(line, "commit")) puts("Applying candidate configuration...");
-    else if (!strncmp(line, "request image pull ", 19)) puts("Receiving container image...");
+    if (!strncmp(line, "request image pull ", 19)) puts("Receiving container image...");
     else if (!strcmp(line, "request platform debug service-container enable")) puts("Preparing platform debug service container...");
     int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     pid_t recovery=-1;
@@ -222,6 +224,8 @@ static void management(const char *line)
         json_object_object_add(request,"user",json_object_new_string(getenv("FCR_SSH_USER")));
         const char *verifier=getenv("FCR_SSH_VERIFIER");
         json_object_object_add(request,"verifier",json_object_new_string(verifier?verifier:""));
+        const char *vty=getenv("FCR_SSH_VTY");
+        json_object_object_add(request,"vty",json_object_new_int(vty?atoi(vty):0));
     }
     const char *text = json_object_to_json_string_ext(request, JSON_C_TO_STRING_PLAIN);
     size_t remaining = strlen(text);
@@ -370,9 +374,62 @@ static void local_execute(const char *line)
             running(&reply, "datastore") ? "online" : "unavailable",
             !statfs("/", &root) && (root.f_flags & ST_RDONLY) ? "read-only" : "FAILED",
             s ? service_state_name(s->state) : "unavailable");
+    } else if (!strcmp(line,"show inventory")) {
+        platform_inventory(1);
     } else if (!strcmp(line, "show version")) {
         struct utsname uts; uname(&uts);
-        printf("FractalCR Software, Version 0.5 (development)\nSystem supervisor: FractalCR\nPlatform kernel: %s\n", uts.release);
+        printf("FractalCR Software, Version %s, %s\nTechnical Support: %s\n%s\n\nPlatform kernel: %s\n", FCR_VERSION, FCR_RELEASE_KIND, FCR_SUPPORT, FCR_COPYRIGHT, uts.release);
+        char rom[128]="Unavailable", image[257]="Unavailable", cmdline[4096];
+        int ignored_startup=0;
+        FILE *cmd=fopen("/proc/cmdline","r");
+        if (cmd) {
+            if (fgets(cmdline,sizeof(cmdline),cmd)) {
+                char *save=NULL;
+                for (char *token=strtok_r(cmdline," \r\n",&save);token;token=strtok_r(NULL," \r\n",&save)) {
+                    if (!strcmp(token,"fcr.ignore_startup=1")) ignored_startup=1;
+                    if (!strncmp(token,"fcr.rommon=",11)) snprintf(rom,sizeof(rom),"%s",token+11);
+                    if (!strncmp(token,"fcr.image_hex=",14)) {
+                        const char *hex=token+14; size_t n=strlen(hex);
+                        if (n && !(n%2) && n/2<sizeof(image) && strspn(hex,"0123456789abcdef")==n) {
+                            for (size_t i=0;i<n/2;i++) { unsigned v=0; (void)sscanf(hex+2*i,"%2x",&v); image[i]=(v>=32 && v<127)?(char)v:'?'; }
+                            image[n/2]=0;
+                        }
+                    }
+                }
+            }
+            fclose(cmd);
+        }
+        printf("ROM: FractalCR System Bootstrap, Version %s\nSystem image file is \"%s\"\n",rom,image);
+        struct sysinfo information;
+        if (!sysinfo(&information)) printf("%s uptime is %ld days, %ld hours, %ld minutes\n",hostname,information.uptime/86400,information.uptime/3600%24,information.uptime/60%60);
+        puts("Last reload reason: Not recorded\n");
+        platform_inventory(1);
+        unsigned interfaces=0;
+        DIR *network=opendir("/sys/class/net");
+        if (network) {
+            struct dirent *entry;
+            while ((entry=readdir(network))) {
+                char device[512];
+                snprintf(device,sizeof(device),"/sys/class/net/%s/device",entry->d_name);
+                if (!access(device,F_OK)) interfaces++;
+            }
+            closedir(network);
+            printf("%u physical network interface%s\n",interfaces,interfaces==1?"":"s");
+        }
+        const char *mounts[]={"/run/filesystems/bootflash","/datastore/data0"};
+        const char *labels[]={"bootflash:","data0:"};
+        for (unsigned i=0;i<2;i++) {
+            struct statfs fs;
+            if (!statfs(mounts[i],&fs) && (unsigned long)fs.f_type==(i?0x9123683eUL:0x4d44UL))
+                printf("%lluK bytes of %s storage (%lluK bytes available)\n",(unsigned long long)fs.f_blocks*fs.f_bsize/1024,labels[i],(unsigned long long)fs.f_bavail*fs.f_bsize/1024);
+        }
+        printf("Configuration register is %s\n",ignored_startup?"0x2142":"0x2102");
+        FILE *identity=fopen("/etc/fractal/build-id","r");
+        if (identity) {
+            char build[65];
+            if (fscanf(identity,"%64[0-9a-f]",build)==1) printf("Source build: %s\n",build);
+            fclose(identity);
+        }
     } else if (!strcmp(line, "show logging")) display_file("/run/log/events.log");
     else if (!strncmp(line, "show logging ", 13)) {
         const char *name = line+13;
@@ -401,7 +458,7 @@ static void local_execute(const char *line)
             puts("% Debug service is not ready; enable it first."); return;
         }
         puts("Entering platform debug container. Host filesystem: /host. Type exit to return.");
-        const char *args[]={"/usr/bin/docker","exec","-it","--env",
+        const char *args[]={"/usr/libexec/fractal-workload","engine","exec","-it","--env",
             "PS1=(platform debug container) \\u@\\h:\\w# ","fractal-platform-debug","/bin/bash","--norc"};
         json_object *arguments=json_object_new_array();
         for (unsigned i=0;i<sizeof(args)/sizeof(args[0]);i++) json_object_array_add(arguments,json_object_new_string(args[i]));
@@ -419,7 +476,7 @@ int platform_console(void)
     remote_console=getenv("FCR_SSH_USER")!=NULL;
     struct stat st;
     if (!stat("/run/log/events.log", &st)) { event_inode = st.st_ino; event_offset = st.st_size; }
-    if (gethostname(hostname, sizeof(hostname)-1)) strcpy(hostname, "ctr");
+    if (gethostname(hostname, sizeof(hostname))) strcpy(hostname, "ctr");
     struct termios term;
     if (tcgetattr(0, &term)) return 1;
     term.c_lflag &= ~(ICANON | ECHO | ISIG); term.c_iflag |= ICRNL;
@@ -448,9 +505,16 @@ int platform_console(void)
         fclose(command_line);
     }
     puts("\nPress RETURN to get started!");
+    int reconnect=0;
     long long tick=monotonic_ms();
     for (;;) {
-        if (close_session) return 0;
+        if (close_session) {
+            if (remote_console) return 0;
+            connected=0; close_session=0; challenged=0; secret_input=0;
+            reconnect=1;
+            editor_init(&editor);
+            puts("\nPress RETURN to get started!");
+        }
         if (connected && monotonic_ms()-tick>=1000) { management("__tick");tick=monotonic_ms(); }
         events();
         struct pollfd input = {.fd=0, .events=POLLIN};
@@ -463,13 +527,21 @@ int platform_console(void)
         for (ssize_t i = 0; i < count; i++) {
             unsigned char c = chars[i];
             if (!connected) {
-                if (c == '\n' || c == '\r') { connected = 1; putchar('\n'); prompt(); }
+                if (c == '\n' || c == '\r') {
+                    connected = 1; putchar('\n');
+                    if (reconnect) { management("__connect"); reconnect=0; }
+                    if (!close_session) prompt();
+                }
                 continue;
             }
             if (challenged) {
                 if (c=='\r'||c=='\n') {
                     putchar('\n');management(input_line);editor_clear(&editor);prompt();
-                } else if (c==3) { editor_clear(&editor);putchar('\n');prompt(); }
+                } else if (c==3) {
+                    editor_clear(&editor);putchar('\n');
+                    if (strstr(auth_prompt,"[confirm]")) management("__cancel");
+                    prompt();
+                }
                 else if (c==127||c==8) { if(input_length) { input_line[--input_length]=0;input_cursor=input_length;if(!secret_input)fputs("\b \b",stdout); } }
                 else if(c>=32&&c<127&&input_length<256) { input_line[input_length++]=(char)c;input_line[input_length]=0;input_cursor=input_length;if(!secret_input)putchar(c); }
                 continue;
@@ -510,10 +582,14 @@ int platform_console(void)
                 putchar('\n');
                 if (editor.overflow) puts("% Command too long.");
                 else { if(!strstr(mode_suffix,"config"))editor_record(&editor); command_busy=1; management(input_line); command_busy=0; }
-                editor_clear(&editor); prompt(); break;
+                editor_clear(&editor); if (!close_session) prompt(); break;
             case EDIT_CANCEL: puts("^C"); prompt(); break;
             case EDIT_END:
                 putchar('\n'); command_busy=1; management("__end"); command_busy=0; prompt(); break;
+            case EDIT_EOF:
+                putchar('\n'); command_busy=1;
+                management(strstr(mode_suffix,"config") ? "exit" : "logout");
+                command_busy=0; editor_clear(&editor); if (!close_session) prompt(); break;
             }
         }
     }
