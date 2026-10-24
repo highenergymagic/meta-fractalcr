@@ -4,7 +4,7 @@ The FractalCR OpenEmbedded layer for x86-64 UEFI, serial console, CIP SLTS,
 read-only initramfs and persistent Btrfs data. It includes Docker and pinned
 Kata/Cloud Hypervisor, Compose, Buildx and BuildKit inputs.
 
-Build through the private [integration repository](https://github.com/highenergymagic/fractalcr).
+Build through the [integration repository](https://github.com/highenergymagic/fractalcr).
 It pins this repository at `os/meta-fractal`, supplies the shared supervisor and
 management sources, embeds the public firmware certificate, and pins compatible
 Wrynose upstream layers. This layer alone is not a complete build checkout.
