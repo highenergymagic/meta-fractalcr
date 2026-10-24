@@ -37,6 +37,7 @@ static unsigned editor_context;
 static int connected, command_busy;
 static int challenged, secret_input, remote_console, close_session;
 static int terminal_monitor;
+static int terminal_privilege=-1;
 static unsigned history_size=10;
 static void reset_editors(void)
 {
@@ -332,13 +333,20 @@ static void management_event(const char *action, const char *line)
             (!strcmp(p,"Username: ") && (!was_challenged || strcmp(action,"tick"))) || close_session) {
             reset_editors(); history_size=10;
             terminal_length=24; terminal_width=80; terminal_monitor=0;
+            terminal_privilege=-1;
         }
         const char *suffix = strchr(p, '(');
         if (!suffix) suffix = strchr(p,'>') ? "> " : "# ";
-        if (strchr(mode_suffix,'#') && strchr(suffix,'>')) {
+        struct json_object *privilege;
+        int next_privilege=terminal_privilege;
+        if (json_object_object_get_ex(reply,"privilege",&privilege)) next_privilege=json_object_get_int(privilege);
+        if ((terminal_privilege>=0 && next_privilege<terminal_privilege) || (strchr(mode_suffix,'#') && strchr(suffix,'>'))) {
             unsigned limit=editor.history_limit;
+            int editing=editor.editing;
             reset_editors(); history_limit(limit);
+            editors[0].editing=editors[1].editing=editing;
         }
+        terminal_privilege=next_privilege;
         if (!challenged) {
             unsigned next=strstr(suffix,"config")!=NULL;
             if (next!=editor_context) { editor_clear(&editor); editor_context=next; editor_clear(&editor); }
