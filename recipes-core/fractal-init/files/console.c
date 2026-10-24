@@ -284,7 +284,10 @@ static void management(const char *line)
     if (json_object_object_get_ex(reply, "prompt", &item)) {
         const char *p = json_object_get_string(item);
         if (challenged) snprintf(auth_prompt,sizeof(auth_prompt),"%s",p);
-        if (!strcmp(line,"__connect") || !strcmp(p,"Username: ") || close_session) {
+        /* An unchanged heartbeat at Username must not erase partially typed
+         * input. Reset only when entering login or handling an explicit reply. */
+        if (!strcmp(line,"__connect") ||
+            (!strcmp(p,"Username: ") && (!was_challenged || strcmp(line,"__tick"))) || close_session) {
             editor_init(&editor); history_size=10;
             terminal_length=24; terminal_width=80; terminal_monitor=0;
         }
