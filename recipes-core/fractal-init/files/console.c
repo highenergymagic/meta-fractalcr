@@ -86,10 +86,47 @@ static void output_text(const char *text)
         else if (c=='\n' || ++output_column>=terminal_width) { output_column=0; output_rows++; }
     }
 }
+/* A stream grant belongs to this console PID and the resolved command kept by
+ * management. A restart, lost socket, revoked policy or login expires it. */
+static int stream_policy(const char *action)
+{
+    int fd=socket(AF_UNIX,SOCK_STREAM|SOCK_CLOEXEC,0);
+    if(fd<0)return 0;
+    struct timeval timeout={.tv_sec=2};
+    setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout));
+    setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof(timeout));
+    struct sockaddr_un address={.sun_family=AF_UNIX};
+    strcpy(address.sun_path,"/run/fractal-management.sock");
+    if(connect(fd,(struct sockaddr *)&address,sizeof(address))) { close(fd);return 0; }
+    char request[128];
+    int length=snprintf(request,sizeof(request),"{\"action\":\"%s\",\"command\":\"\"}\n",action);
+    size_t sent=0;
+    while(sent<(size_t)length) {
+        ssize_t n=send(fd,request+sent,(size_t)length-sent,MSG_NOSIGNAL);
+        if(n<0 && errno==EINTR)continue;
+        if(n<=0){close(fd);return 0;}
+        sent+=(size_t)n;
+    }
+    char buffer[8192];size_t used=0;
+    while(used<sizeof(buffer)-1) {
+        ssize_t n=recv(fd,buffer+used,sizeof(buffer)-1-used,0);
+        if(n<0 && errno==EINTR)continue;
+        if(n<=0)break;
+        used+=(size_t)n;
+        if(memchr(buffer,'\n',used))break;
+    }
+    close(fd);buffer[used]=0;
+    json_object *response=json_tokener_parse(buffer),*grant;
+    int allowed=response && json_object_object_get_ex(response,"stream",&grant) && json_object_get_boolean(grant);
+    if(response)json_object_put(response);
+    return allowed;
+}
+
 /* Native Docker clients keep their own streaming/interactive protocol. A PTY
  * gives Ctrl-C and attach/exec a real foreground terminal without a host shell. */
 static void native_execute(json_object *arguments)
 {
+    if(!stream_policy("stream-check")){puts("% Authorization failed.");return;}
     size_t count=json_object_array_length(arguments);
     if (!count || count>256) { puts("% Invalid native command."); return; }
     char *argv[257];
@@ -122,10 +159,18 @@ static void native_execute(json_object *arguments)
     tcsetattr(0,TCSANOW,&stream_term);
     fcntl(master,F_SETFL,fcntl(master,F_GETFL)|O_NONBLOCK);
     char pending[8192]; size_t pending_size=0;
+    long long checked=monotonic_ms();
     for (;;) {
+        if(monotonic_ms()-checked>=1000) {
+            if(!stream_policy("stream-check")) {
+                kill(-child,SIGKILL);kill(child,SIGKILL);
+                puts("% Command authorization revoked.");break;
+            }
+            checked=monotonic_ms();
+        }
         struct pollfd fds[2]={{.fd=master,.events=POLLIN | (pending_size?POLLOUT:0)},
                              {.fd=0,.events=pending_size<4096?POLLIN:0}};
-        if (poll(fds,2,-1)<0) { if (errno==EINTR) continue; break; }
+        if (poll(fds,2,250)<0) { if (errno==EINTR) continue; break; }
         char buffer[4096];
         if (fds[0].revents & (POLLIN|POLLHUP|POLLERR)) {
             ssize_t n=read(master,buffer,sizeof(buffer));
@@ -146,6 +191,7 @@ static void native_execute(json_object *arguments)
     close(master);
     int status=0;
     while (waitpid(child,&status,0)<0 && errno==EINTR) {}
+    stream_policy("stream-end");
     tcsetattr(0,TCSANOW,&console_term);
     if (WIFEXITED(status) && WEXITSTATUS(status)) printf("%% Client exited with status %d.\n",WEXITSTATUS(status));
     else if (WIFSIGNALED(status)) printf("%% Client terminated by signal %d.\n",WTERMSIG(status));
