@@ -1,7 +1,7 @@
 SUMMARY = "FractalCR platform supervisor and container bring-up diagnostics"
 LICENSE = "MIT"
 LIC_FILES_CHKSUM = "file://${COMMON_LICENSE_DIR}/MIT;md5=0835ade698e0bcf8506ecda2f7b4f302"
-SRC_URI = "file://release.h file://platform.c file://console.c file://platform-info.h file://line-editor.c file://line-editor.h file://buildkit-runc.c file://virtiofsd.c file://syslog.c file://supervisor.c file://supervisor.h file://manager.c \
+SRC_URI = "file://release.h file://platform.c file://console.c file://platform-info.h file://line-editor.c file://line-editor.h file://pager.c file://pager.h file://buildkit-runc.c file://virtiofsd.c file://syslog.c file://supervisor.c file://supervisor.h file://manager.c \
            file://graph.c file://graph.h file://control.c file://control.h file://logging.c file://probe.c file://build-id"
 S = "${UNPACKDIR}"
 SOURCE_DATE_EPOCH = "1792454400"
@@ -10,7 +10,7 @@ RDEPENDS:${PN} = "docker-moby fractal-management fractal-storage"
 inherit pkgconfig
 do_compile() {
     ${CC} ${CFLAGS} ${LDFLAGS} -Wall -Wextra -Werror manager.c supervisor.c graph.c -o fractal-init
-    ${CC} ${CFLAGS} ${LDFLAGS} -Wall -Wextra -Werror platform.c console.c line-editor.c syslog.c supervisor.c control.c logging.c -o fractal-platform \
+    ${CC} ${CFLAGS} ${LDFLAGS} -Wall -Wextra -Werror platform.c console.c line-editor.c pager.c syslog.c supervisor.c control.c logging.c -o fractal-platform \
         $(pkg-config --cflags --libs json-c blkid) -lutil
     ${CC} ${CFLAGS} -Wall -Wextra -Werror -static -Os probe.c -o probe
     ${CC} ${CFLAGS} ${LDFLAGS} -Wall -Wextra -Werror buildkit-runc.c -o fractal-buildkit-runc

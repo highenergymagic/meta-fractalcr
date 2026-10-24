@@ -4,6 +4,7 @@
 #include "control.h"
 #include "platform-info.h"
 #include "line-editor.h"
+#include "pager.h"
 #include <errno.h>
 #include <dirent.h>
 #include <fcntl.h>
@@ -58,33 +59,51 @@ static unsigned baud_value(speed_t rate)
     }
 }
 static char auth_prompt[2048];
-static unsigned terminal_length=24, terminal_width=80, output_rows, output_column;
-static int output_aborted;
+static unsigned terminal_length=24, terminal_width=80;
+static int input_after_cr, capturing_output;
+static struct pager output_pager;
+#define output_aborted output_pager.aborted
 static size_t view_start;
 static off_t event_offset;
 static ino_t event_inode;
 static void local_execute(const char *line);
 static void management_event(const char *action, const char *line);
+static int output_key(void *context)
+{
+    (void)context;
+    unsigned char key;
+    for(;;){
+        ssize_t n=read(0,&key,1);
+        if(n<0 && errno==EINTR)continue;
+        if(n!=1)return -1;
+        if(terminal_input_byte(&key,&input_after_cr))return key;
+    }
+}
+static void output_bytes(void *context,const char *text,size_t size)
+{
+    (void)context;fwrite(text,1,size,stdout);fflush(stdout);
+}
+static void output_reset(int locked)
+{
+    output_pager.read_key=output_key;output_pager.write=output_bytes;
+    pager_reset(&output_pager,terminal_length,terminal_width,locked);
+}
 static void output_text(const char *text)
 {
-    while (*text && !output_aborted) {
-            unsigned page=terminal_length>1 ? terminal_length-1 : 1;
-            if (terminal_length && output_rows>=page) {
-                fputs(" --More-- ",stdout); fflush(stdout);
-                unsigned char key=0;
-                while (read(0,&key,1)==1) {
-                    if (key=='q' || key=='Q' || key==3) { output_aborted=1; break; }
-                    if (key==' ') { output_rows=0; break; }
-                    if (key=='\r' || key=='\n') { output_rows=page-1; break; }
-                }
-                fputs("\r\033[2K",stdout);
-            }
-        unsigned char c=(unsigned char)*text++;
-        if (output_aborted) break;
-        putchar(c);
-        if (c=='\r') output_column=0;
-        else if (c=='\n' || ++output_column>=terminal_width) { output_column=0; output_rows++; }
-    }
+    if(capturing_output)fputs(text,stdout);
+    else pager_write(&output_pager,text);
+}
+static void local_display(const char *line)
+{
+    if(strncmp(line,"show ",5) && strncmp(line,"do show ",8)){local_execute(line);return;}
+    char *text=NULL;size_t size=0;
+    FILE *capture=open_memstream(&text,&size),*original=stdout;
+    if(!capture){puts("% Insufficient memory for display.");return;}
+    stdout=capture;capturing_output=1;
+    local_execute(line);
+    fflush(stdout);stdout=original;fclose(capture);capturing_output=0;
+    if(text)output_text(text);
+    free(text);
 }
 /* A stream grant belongs to this console PID and the resolved command kept by
  * management. A restart, lost socket, revoked policy or login expires it. */
@@ -246,11 +265,11 @@ static void filtered_reply(json_object *reply,json_object *filter)
     FILE *capture=open_memstream(&text,&length),*original=stdout;
     if (!capture) { if(!redirect)regfree(&regex);return; }
     unsigned saved_length=terminal_length;
-    terminal_length=0;stdout=capture;
+    terminal_length=0;stdout=capture;capturing_output=1;
     if (json_object_object_get_ex(reply,"output",&item) && *json_object_get_string(item)) puts(json_object_get_string(item));
     if (json_object_object_get_ex(reply,"local",&item)) local_execute(json_object_get_string(item));
-    fflush(stdout);stdout=original;fclose(capture);terminal_length=saved_length;
-    output_rows=output_column=0;
+    fflush(stdout);stdout=original;fclose(capture);terminal_length=saved_length;capturing_output=0;
+    output_reset(!strcmp(kind,"include")||!strcmp(kind,"exclude")||!strncmp(kind,"section",7));
     if(redirect) {
         if(length>1024*1024) puts("% Command output exceeds redirection limit.");
         else management_event("output",text?text:"");
@@ -365,7 +384,7 @@ static void management_event(const char *action, const char *line)
     if (!filtered && json_object_object_get_ex(reply, "output", &item) && *json_object_get_string(item)) {
         const char *output=json_object_get_string(item);
         if (!strcmp(output,"\a")) putchar('\a');
-        else { output_text(output); if (!output_aborted) putchar('\n'); }
+        else { output_text(output); if (!output_aborted) output_text("\n"); }
     }
     if (json_object_object_get_ex(reply, "error_column", &item)) {
         int column=json_object_get_int(item);
@@ -407,7 +426,8 @@ static void management_event(const char *action, const char *line)
             strcpy(input_line, completed); input_length = input_cursor = strlen(completed);
         }
     }
-    if (!filtered && json_object_object_get_ex(reply, "local", &item)) local_execute(json_object_get_string(item));
+    if (!filtered && json_object_object_get_ex(reply, "local", &item)) local_display(json_object_get_string(item));
+    if(!capturing_output)pager_finish(&output_pager);
     if (json_object_object_get_ex(reply, "argv", &item)) native_execute(item);
     if (json_object_object_get_ex(reply,"notify",&item) && *json_object_get_string(item)) {
         fputs("\r\033[2K",stdout); fputs(json_object_get_string(item),stdout);
@@ -617,7 +637,7 @@ int platform_console(void)
     term.c_cc[VMIN] = 1; term.c_cc[VTIME] = 0;
     if (tcsetattr(0, TCSANOW, &term)) return 1;
     if (!remote_console) service_notify();
-    int input_after_cr=0;
+    input_after_cr=0;output_reset(0);
     long long deadline = monotonic_ms() + 3000;
     struct control_reply reply;
     while (!remote_console && monotonic_ms() < deadline) {
@@ -693,7 +713,7 @@ int platform_console(void)
             case EDIT_BELL: putchar('\a'); break;
             case EDIT_REDRAW: fputs("\r\033[2K",stdout); prompt(); break;
             case EDIT_HELP: {
-                output_rows=output_column=0; output_aborted=0;
+                output_reset(0);
                 char query[2080];
                 snprintf(query,sizeof(query),"%.*s",(int)input_cursor,input_line);
                 fputs("?\n",stdout); command_busy=1; management_event("help",query); command_busy=0; prompt();
@@ -711,7 +731,7 @@ int platform_console(void)
                 fputs("\r\033[2K",stdout); prompt(); break;
             }
             case EDIT_SUBMIT:
-                output_rows=output_column=0; output_aborted=0;
+                output_reset(0);
                 putchar('\n');
                 if (editor.overflow) puts("% Command too long.");
                 else { editor_record(&editor); command_busy=1; management(input_line); command_busy=0; }
