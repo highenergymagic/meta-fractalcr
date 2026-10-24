@@ -159,12 +159,13 @@ static void native_execute(json_object *arguments)
     tcsetattr(0,TCSANOW,&stream_term);
     fcntl(master,F_SETFL,fcntl(master,F_GETFL)|O_NONBLOCK);
     char pending[8192]; size_t pending_size=0;
+    int revoked=0;
     long long checked=monotonic_ms();
     for (;;) {
         if(monotonic_ms()-checked>=1000) {
             if(!stream_policy("stream-check")) {
                 kill(-child,SIGKILL);kill(child,SIGKILL);
-                puts("% Command authorization revoked.");break;
+                revoked=1;break;
             }
             checked=monotonic_ms();
         }
@@ -193,7 +194,8 @@ static void native_execute(json_object *arguments)
     while (waitpid(child,&status,0)<0 && errno==EINTR) {}
     stream_policy("stream-end");
     tcsetattr(0,TCSANOW,&console_term);
-    if (WIFEXITED(status) && WEXITSTATUS(status)) printf("%% Client exited with status %d.\n",WEXITSTATUS(status));
+    if (revoked) puts("% Command authorization revoked.");
+    else if (WIFEXITED(status) && WEXITSTATUS(status)) printf("%% Client exited with status %d.\n",WEXITSTATUS(status));
     else if (WIFSIGNALED(status)) printf("%% Client terminated by signal %d.\n",WTERMSIG(status));
 }
 static void prompt(void)
