@@ -11,15 +11,22 @@ int terminal_input_byte(unsigned char *c, int *after_cr) {
     return 1;
 }
 
-void editor_init(struct line_editor *e) { memset(e,0,sizeof(*e)); e->history_limit=10; }
+void editor_init(struct line_editor *e) { memset(e,0,sizeof(*e)); e->history_limit=10; e->editing=1; }
 void editor_clear(struct line_editor *e) {
     e->line[0]=0; e->length=e->cursor=0; e->overflow=e->escape=e->literal=e->yank_valid=0;
     e->history_back=0; e->draft[0]=0;
 }
 void editor_record(struct line_editor *e) {
     if (!e->overflow && e->length && e->history_limit &&
-        (!e->history_count || strcmp(e->line,e->history[(e->history_count-1)%HISTORY_CAPACITY])))
+        (!e->history_kept || strcmp(e->line,e->history[(e->history_count-1)%HISTORY_CAPACITY]))) {
         strcpy(e->history[e->history_count++%HISTORY_CAPACITY],e->line);
+        if(e->history_kept<e->history_limit)e->history_kept++;
+    }
+}
+void editor_history_limit(struct line_editor *e, unsigned limit) {
+    e->history_limit=limit>HISTORY_CAPACITY?HISTORY_CAPACITY:limit;
+    if(limit && e->history_kept>limit)e->history_kept=limit;
+    e->history_back=0;
 }
 static void erase(struct line_editor *e, size_t from, size_t to, int save) {
     if (from==to) return;
@@ -31,7 +38,7 @@ static void erase(struct line_editor *e, size_t from, size_t to, int save) {
     e->length-=to-from; e->cursor=from; e->overflow=0;
 }
 static enum edit_action recall(struct line_editor *e, int older) {
-    unsigned available=e->history_count<HISTORY_CAPACITY ? e->history_count : HISTORY_CAPACITY;
+    unsigned available=e->history_kept;
     if (available>e->history_limit) available=e->history_limit;
     if (older) {
         if (e->history_back>=available) return EDIT_BELL;
@@ -57,6 +64,14 @@ static enum edit_action yank(struct line_editor *e, int older) {
     return EDIT_REDRAW;
 }
 enum edit_action editor_feed(struct line_editor *e, unsigned char c) {
+    if (!e->editing && !e->literal) {
+        if (c==27) { e->escape=1; return EDIT_NONE; }
+        if (e->escape) {
+            if (e->escape==1 && (c=='[' || c=='O')) { e->escape=2; return EDIT_NONE; }
+            e->escape=0; return EDIT_BELL;
+        }
+        if (c<32 && c!=3 && c!=4 && c!=8 && c!=9 && c!=10 && c!=13 && c!=14 && c!=16 && c!=22 && c!=26) return EDIT_BELL;
+    }
     if (e->literal) { e->literal=0; goto literal; }
     if (e->escape) {
         int state=e->escape; e->escape=0;

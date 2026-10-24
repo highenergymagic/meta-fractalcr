@@ -9,13 +9,14 @@ struct line_editor {
     char line[LINE_CAPACITY], draft[LINE_CAPACITY];
     size_t length, cursor;
     char history[HISTORY_CAPACITY][LINE_CAPACITY], kills[10][LINE_CAPACITY];
-    unsigned history_count, history_back, history_limit, kill_count, kill_back;
+    unsigned history_count, history_kept, history_back, history_limit, kill_count, kill_back;
     size_t yank_start, yank_length;
-    int escape, literal, overflow, yank_valid;
+    int escape, literal, overflow, yank_valid, editing;
 };
 void editor_init(struct line_editor *e);
 void editor_clear(struct line_editor *e);
 void editor_record(struct line_editor *e);
+void editor_history_limit(struct line_editor *e, unsigned limit);
 int terminal_input_byte(unsigned char *c, int *after_cr);
 enum edit_action editor_feed(struct line_editor *e, unsigned char c);
 #endif

@@ -28,7 +28,9 @@
 #include <unistd.h>
 
 static char hostname[64] = "ctr", mode_suffix[64] = "# ";
-static struct line_editor editor;
+static struct line_editor editors[2];
+static unsigned editor_context;
+#define editor editors[editor_context]
 #define input_line editor.line
 #define input_length editor.length
 #define input_cursor editor.cursor
@@ -36,6 +38,24 @@ static int connected, command_busy;
 static int challenged, secret_input, remote_console, close_session;
 static int terminal_monitor;
 static unsigned history_size=10;
+static void reset_editors(void)
+{
+    editor_init(&editors[0]); editor_init(&editors[1]); editor_context=0;
+}
+static void history_limit(unsigned limit)
+{
+    editor_history_limit(&editors[0],limit);editor_history_limit(&editors[1],limit);
+}
+static unsigned baud_value(speed_t rate)
+{
+    switch(rate) {
+    case B0:return 0; case B50:return 50; case B75:return 75; case B110:return 110;
+    case B300:return 300; case B600:return 600; case B1200:return 1200;
+    case B2400:return 2400; case B4800:return 4800; case B9600:return 9600;
+    case B19200:return 19200; case B38400:return 38400; case B57600:return 57600;
+    case B115200:return 115200; case B230400:return 230400; default:return 0;
+    }
+}
 static char auth_prompt[2048];
 static unsigned terminal_length=24, terminal_width=80, output_rows, output_column;
 static int output_aborted;
@@ -43,6 +63,7 @@ static size_t view_start;
 static off_t event_offset;
 static ino_t event_inode;
 static void local_execute(const char *line);
+static void management_event(const char *action, const char *line);
 static void output_text(const char *text)
 {
     while (*text && !output_aborted) {
@@ -169,17 +190,23 @@ static void filtered_reply(json_object *reply,json_object *filter)
     json_object *mode,*pattern,*item;
     if (!json_object_object_get_ex(filter,"mode",&mode) || !json_object_object_get_ex(filter,"pattern",&pattern)) return;
     const char *kind=json_object_get_string(mode);
+    int redirect=!strcmp(kind,"redirect")||!strcmp(kind,"append")||!strcmp(kind,"tee")||!strcmp(kind,"tee-append");
     regex_t regex;
-    if (regcomp(&regex,json_object_get_string(pattern),REG_EXTENDED|REG_NOSUB)) { puts("% Invalid output filter.");return; }
+    if (!redirect && regcomp(&regex,json_object_get_string(pattern),REG_EXTENDED|REG_NOSUB)) { puts("% Invalid output filter.");return; }
     char *text=NULL;size_t length=0;
     FILE *capture=open_memstream(&text,&length),*original=stdout;
-    if (!capture) { regfree(&regex);return; }
+    if (!capture) { if(!redirect)regfree(&regex);return; }
     unsigned saved_length=terminal_length;
     terminal_length=0;stdout=capture;
     if (json_object_object_get_ex(reply,"output",&item) && *json_object_get_string(item)) puts(json_object_get_string(item));
     if (json_object_object_get_ex(reply,"local",&item)) local_execute(json_object_get_string(item));
     fflush(stdout);stdout=original;fclose(capture);terminal_length=saved_length;
     output_rows=output_column=0;
+    if(redirect) {
+        if(length>1024*1024) puts("% Command output exceeds redirection limit.");
+        else management_event("output",text?text:"");
+        free(text);return;
+    }
     unsigned count=0;int begun=0,section=0;
     for(char *line=text;line && *line;) {
         char *end=strchr(line,'\n');if(end)*end=0;
@@ -208,7 +235,7 @@ static void management_event(const char *action, const char *line)
     if (fd < 0 || connect(fd, (struct sockaddr *)&address, sizeof(address))) {
         if (fd >= 0) close(fd);
         int pipes[2];
-        if (remote_console || pipe2(pipes,O_CLOEXEC)) {
+        if (remote_console || !strcmp(action,"output") || pipe2(pipes,O_CLOEXEC)) {
             puts("% Management unavailable; access denied.");
             if (remote_console) close_session=1;
             return;
@@ -225,6 +252,19 @@ static void management_event(const char *action, const char *line)
     json_object *request = json_object_new_object();
     json_object_object_add(request,"action",json_object_new_string(action));
     json_object_object_add(request, "command", json_object_new_string(line));
+    json_object *terminal=json_object_new_object();
+    json_object_object_add(terminal,"length",json_object_new_int((int)terminal_length));
+    json_object_object_add(terminal,"width",json_object_new_int((int)terminal_width));
+    json_object_object_add(terminal,"history_size",json_object_new_int((int)history_size));
+    json_object_object_add(terminal,"history",json_object_new_boolean(editor.history_limit!=0));
+    json_object_object_add(terminal,"editing",json_object_new_boolean(editor.editing));
+    json_object_object_add(terminal,"monitor",json_object_new_boolean(terminal_monitor));
+    struct termios current_term;
+    if (!remote_console && !tcgetattr(0,&current_term)) {
+        json_object_object_add(terminal,"tx",json_object_new_int((int)baud_value(cfgetospeed(&current_term))));
+        json_object_object_add(terminal,"rx",json_object_new_int((int)baud_value(cfgetispeed(&current_term))));
+    }
+    json_object_object_add(request,"terminal",terminal);
     if (remote_console) {
         json_object_object_add(request,"transport",json_object_new_string("ssh"));
         json_object_object_add(request,"user",json_object_new_string(getenv("FCR_SSH_USER")));
@@ -244,14 +284,15 @@ static void management_event(const char *action, const char *line)
     }
     int sent = recovery>=0 || (!remaining && send(fd, "\n", 1, MSG_NOSIGNAL) == 1);
     json_object_put(request);
-    char *buffer = calloc(1, 131073);
+    const size_t response_limit=7*1024*1024;
+    char *buffer = calloc(1, response_limit+1);
     size_t used = 0;
     long long deadline = monotonic_ms() + 360000;
-    while (buffer && sent && used < 131072 && monotonic_ms() < deadline) {
+    while (buffer && sent && used < response_limit && monotonic_ms() < deadline) {
         struct pollfd p = {.fd=fd,.events=POLLIN};
         events();
         if (poll(&p, 1, 100) <= 0) continue;
-        ssize_t n = read(fd, buffer+used, 131072-used);
+        ssize_t n = read(fd, buffer+used, response_limit-used);
         if (n <= 0) break;
         used += (size_t)n;
         if (memchr(buffer, '\n', used)) break;
@@ -289,14 +330,18 @@ static void management_event(const char *action, const char *line)
          * input. Reset only when entering login or handling an explicit reply. */
         if (!strcmp(action,"connect") ||
             (!strcmp(p,"Username: ") && (!was_challenged || strcmp(action,"tick"))) || close_session) {
-            editor_init(&editor); history_size=10;
+            reset_editors(); history_size=10;
             terminal_length=24; terminal_width=80; terminal_monitor=0;
         }
         const char *suffix = strchr(p, '(');
         if (!suffix) suffix = strchr(p,'>') ? "> " : "# ";
         if (strchr(mode_suffix,'#') && strchr(suffix,'>')) {
             unsigned limit=editor.history_limit;
-            editor_init(&editor); editor.history_limit=limit;
+            reset_editors(); history_limit(limit);
+        }
+        if (!challenged) {
+            unsigned next=strstr(suffix,"config")!=NULL;
+            if (next!=editor_context) { editor_clear(&editor); editor_context=next; editor_clear(&editor); }
         }
         snprintf(mode_suffix, sizeof(mode_suffix), "%.63s", suffix);
     }
@@ -308,6 +353,10 @@ static void management_event(const char *action, const char *line)
     }
     if (!filtered && json_object_object_get_ex(reply, "local", &item)) local_execute(json_object_get_string(item));
     if (json_object_object_get_ex(reply, "argv", &item)) native_execute(item);
+    if (json_object_object_get_ex(reply,"notify",&item) && *json_object_get_string(item)) {
+        fputs("\r\033[2K",stdout); fputs(json_object_get_string(item),stdout);
+        if (!strcmp(action,"tick")) prompt();
+    }
     json_object_put(reply);
     if (!strcmp(action,"tick") && challenged!=was_challenged) { putchar('\n'); prompt(); }
 }
@@ -364,9 +413,11 @@ static void local_execute(const char *line)
     if (!strncmp(line, "do ", 3)) line += 3;
     struct control_reply reply;
     if (!strncmp(line,"terminal ",9)) {
-        if (!strcmp(line,"terminal history")) { editor.history_limit=history_size; return; }
-        if (!strcmp(line,"terminal no history")) { editor.history_limit=0; return; }
-        if (!strcmp(line,"terminal no history size")) { history_size=editor.history_limit=10; return; }
+        if (!strcmp(line,"terminal editing")) { editors[0].editing=editors[1].editing=1; return; }
+        if (!strcmp(line,"terminal no editing")) { editors[0].editing=editors[1].editing=0; return; }
+        if (!strcmp(line,"terminal history")) { history_limit(history_size); return; }
+        if (!strcmp(line,"terminal no history")) { history_limit(0); return; }
+        if (!strcmp(line,"terminal no history size")) { history_size=10; history_limit(10); return; }
         if (!strcmp(line,"terminal monitor")) { terminal_monitor=1; return; }
         if (!strcmp(line,"terminal no monitor")) { terminal_monitor=0; return; }
         const char *number=NULL; unsigned minimum=0, maximum=512;
@@ -380,11 +431,9 @@ static void local_execute(const char *line)
             puts("% Invalid terminal setting value."); return;
         }
         *setting=(unsigned)value;
-        if (setting==&editor.history_limit) history_size=(unsigned)value;
-    } else if (!strcmp(line,"show terminal")) {
-        printf("Length: %u lines, Width: %u columns\nHistory: %u commands\n",terminal_length,terminal_width,editor.history_limit);
+        if (setting==&editor.history_limit) { history_size=(unsigned)value; history_limit(history_size); }
     } else if (!strcmp(line,"show history")) {
-        unsigned count=editor.history_count<HISTORY_CAPACITY?editor.history_count:HISTORY_CAPACITY;
+        unsigned count=editor.history_kept;
         if (count>editor.history_limit) count=editor.history_limit;
         for (unsigned i=editor.history_count-count;i<editor.history_count;i++) {
             output_text("  "); output_text(editor.history[i%HISTORY_CAPACITY]); output_text("\n");
@@ -520,7 +569,7 @@ int platform_console(void)
         usleep(50000);
     }
     if (!stat("/run/log/events.log", &st)) { event_inode = st.st_ino; event_offset = st.st_size; }
-    editor_init(&editor);
+    reset_editors();
     management_event("connect","");
     if (close_session) return 0;
     FILE *command_line = fopen("/proc/cmdline", "r");
@@ -609,7 +658,7 @@ int platform_console(void)
                 output_rows=output_column=0; output_aborted=0;
                 putchar('\n');
                 if (editor.overflow) puts("% Command too long.");
-                else { if(!strstr(mode_suffix,"config"))editor_record(&editor); command_busy=1; management(input_line); command_busy=0; }
+                else { editor_record(&editor); command_busy=1; management(input_line); command_busy=0; }
                 editor_clear(&editor); if (!close_session) prompt(); break;
             case EDIT_CANCEL: puts("^C"); prompt(); break;
             case EDIT_END:
