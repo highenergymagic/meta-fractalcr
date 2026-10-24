@@ -34,7 +34,9 @@ static struct line_editor editor;
 #define input_cursor editor.cursor
 static int connected, command_busy;
 static int challenged, secret_input, remote_console, close_session;
-static char auth_prompt[64];
+static int terminal_monitor;
+static unsigned history_size=10;
+static char auth_prompt[2048];
 static unsigned terminal_length=24, terminal_width=80, output_rows, output_column;
 static int output_aborted;
 static size_t view_start;
@@ -146,7 +148,7 @@ static void prompt(void)
 }
 static void events(void)
 {
-    if (remote_console || challenged) return;
+    if ((remote_console && !terminal_monitor) || challenged) return;
     FILE *f = fopen("/run/log/events.log", "r");
     struct stat st;
     if (!f) return;
@@ -178,12 +180,15 @@ static void filtered_reply(json_object *reply,json_object *filter)
     if (json_object_object_get_ex(reply,"local",&item)) local_execute(json_object_get_string(item));
     fflush(stdout);stdout=original;fclose(capture);terminal_length=saved_length;
     output_rows=output_column=0;
-    unsigned count=0;int begun=0;
+    unsigned count=0;int begun=0,section=0;
     for(char *line=text;line && *line;) {
         char *end=strchr(line,'\n');if(end)*end=0;
         int match=regexec(&regex,line,0,NULL,0)==0;
         if(match){count++;begun=1;}
-        if ((!strcmp(kind,"include")&&match)||(!strcmp(kind,"exclude")&&!match)||(!strcmp(kind,"begin")&&begun)) {
+        if (*line && *line!=' ' && *line!='\t') section=0;
+        section=section||match;
+        if ((!strcmp(kind,"include")&&match)||(!strcmp(kind,"exclude")&&!match)||(!strcmp(kind,"begin")&&begun)||
+            (!strncmp(kind,"section",7) && section!=(!strcmp(kind,"section-exclude")))) {
             output_text(line);output_text("\n");
         }
         if(!end)break;
@@ -225,6 +230,8 @@ static void management(const char *line)
         const char *verifier=getenv("FCR_SSH_VERIFIER");
         json_object_object_add(request,"verifier",json_object_new_string(verifier?verifier:""));
         const char *vty=getenv("FCR_SSH_VTY");
+        const char *peer=getenv("FCR_SSH_PEER");
+        if(peer)json_object_object_add(request,"peer",json_object_new_string(peer));
         json_object_object_add(request,"vty",json_object_new_int(vty?atoi(vty):0));
     }
     const char *text = json_object_to_json_string_ext(request, JSON_C_TO_STRING_PLAIN);
@@ -260,7 +267,7 @@ static void management(const char *line)
     challenged=json_object_object_get_ex(reply,"challenge",&item) && json_object_get_boolean(item);
     secret_input=json_object_object_get_ex(reply,"secret",&item) && json_object_get_boolean(item);
     close_session=json_object_object_get_ex(reply,"close",&item) && json_object_get_boolean(item);
-    if (challenged!=was_challenged) editor_init(&editor);
+    if (challenged!=was_challenged) editor_clear(&editor);
     json_object *filter=NULL;
     int filtered=json_object_object_get_ex(reply,"filter",&filter);
     if(filtered)filtered_reply(reply,filter);
@@ -276,10 +283,17 @@ static void management(const char *line)
     if (json_object_object_get_ex(reply, "error", &item)) printf("%% %s\n", json_object_get_string(item));
     if (json_object_object_get_ex(reply, "prompt", &item)) {
         const char *p = json_object_get_string(item);
-        if (challenged) snprintf(auth_prompt,sizeof(auth_prompt),"%.63s",p);
+        if (challenged) snprintf(auth_prompt,sizeof(auth_prompt),"%s",p);
+        if (!strcmp(line,"__connect") || !strcmp(p,"Username: ") || close_session) {
+            editor_init(&editor); history_size=10;
+            terminal_length=24; terminal_width=80; terminal_monitor=0;
+        }
         const char *suffix = strchr(p, '(');
         if (!suffix) suffix = strchr(p,'>') ? "> " : "# ";
-        if (strchr(mode_suffix,'#') && strchr(suffix,'>')) editor_init(&editor);
+        if (strchr(mode_suffix,'#') && strchr(suffix,'>')) {
+            unsigned limit=editor.history_limit;
+            editor_init(&editor); editor.history_limit=limit;
+        }
         snprintf(mode_suffix, sizeof(mode_suffix), "%.63s", suffix);
     }
     if (json_object_object_get_ex(reply, "completion", &item)) {
@@ -345,6 +359,11 @@ static void local_execute(const char *line)
     if (!strncmp(line, "do ", 3)) line += 3;
     struct control_reply reply;
     if (!strncmp(line,"terminal ",9)) {
+        if (!strcmp(line,"terminal history")) { editor.history_limit=history_size; return; }
+        if (!strcmp(line,"terminal no history")) { editor.history_limit=0; return; }
+        if (!strcmp(line,"terminal no history size")) { history_size=editor.history_limit=10; return; }
+        if (!strcmp(line,"terminal monitor")) { terminal_monitor=1; return; }
+        if (!strcmp(line,"terminal no monitor")) { terminal_monitor=0; return; }
         const char *number=NULL; unsigned minimum=0, maximum=512;
         unsigned *setting=NULL;
         if (!strncmp(line,"terminal length ",16)) { number=line+16; setting=&terminal_length; }
@@ -356,6 +375,7 @@ static void local_execute(const char *line)
             puts("% Invalid terminal setting value."); return;
         }
         *setting=(unsigned)value;
+        if (setting==&editor.history_limit) history_size=(unsigned)value;
     } else if (!strcmp(line,"show terminal")) {
         printf("Length: %u lines, Width: %u columns\nHistory: %u commands\n",terminal_length,terminal_width,editor.history_limit);
     } else if (!strcmp(line,"show history")) {
@@ -539,7 +559,7 @@ int platform_console(void)
                     putchar('\n');management(input_line);editor_clear(&editor);prompt();
                 } else if (c==3) {
                     editor_clear(&editor);putchar('\n');
-                    if (strstr(auth_prompt,"[confirm]")) management("__cancel");
+                    management("__cancel");
                     prompt();
                 }
                 else if (c==127||c==8) { if(input_length) { input_line[--input_length]=0;input_cursor=input_length;if(!secret_input)fputs("\b \b",stdout); } }
