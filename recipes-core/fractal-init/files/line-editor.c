@@ -79,6 +79,22 @@ enum edit_action editor_feed(struct line_editor *e, unsigned char c) {
             if (c=='[' || c=='O') { e->escape=2; return EDIT_NONE; }
             if (c=='q' || c=='Q') { e->literal=1; return EDIT_NONE; }
             if (c=='y' || c=='Y') return yank(e,1);
+            if (c=='d' || c=='D' || c=='c' || c=='C' || c=='u' || c=='U' || c=='l' || c=='L') {
+                size_t start=e->cursor, first=start, end;
+                while(first<e->length && isspace((unsigned char)e->line[first]))first++;
+                end=first;
+                while(end<e->length && !isspace((unsigned char)e->line[end]))end++;
+                e->yank_valid=0;
+                if(c=='d'||c=='D')erase(e,start,end,1);
+                else {
+                    for(size_t i=first;i<end;i++) {
+                        unsigned char ch=(unsigned char)e->line[i];
+                        e->line[i]=(char)((c=='u'||c=='U'||((c=='c'||c=='C')&&i==first))?toupper(ch):tolower(ch));
+                    }
+                    e->cursor=end;
+                }
+                return EDIT_REDRAW;
+            }
             if (c=='b' || c=='B') {
                 while (e->cursor && isspace((unsigned char)e->line[e->cursor-1])) e->cursor--;
                 while (e->cursor && !isspace((unsigned char)e->line[e->cursor-1])) e->cursor--;

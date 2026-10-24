@@ -40,6 +40,7 @@ static int challenged, secret_input, remote_console, close_session;
 static int terminal_monitor;
 static int terminal_privilege=-1;
 static unsigned history_size=10;
+static int history_enabled=1;
 static void reset_editors(void)
 {
     editor_init(&editors[0]); editor_init(&editors[1]); editor_context=0;
@@ -324,7 +325,7 @@ static void management_event(const char *action, const char *line)
     json_object_object_add(terminal,"length",json_object_new_int((int)terminal_length));
     json_object_object_add(terminal,"width",json_object_new_int((int)terminal_width));
     json_object_object_add(terminal,"history_size",json_object_new_int((int)history_size));
-    json_object_object_add(terminal,"history",json_object_new_boolean(editor.history_limit!=0));
+    json_object_object_add(terminal,"history",json_object_new_boolean(history_enabled));
     json_object_object_add(terminal,"editing",json_object_new_boolean(editor.editing));
     json_object_object_add(terminal,"monitor",json_object_new_boolean(terminal_monitor));
     struct termios current_term;
@@ -398,7 +399,7 @@ static void management_event(const char *action, const char *line)
          * input. Reset only when entering login or handling an explicit reply. */
         if (!strcmp(action,"connect") ||
             (!strcmp(p,"Username: ") && (!was_challenged || strcmp(action,"tick"))) || close_session) {
-            reset_editors(); history_size=10;
+            reset_editors(); history_size=10; history_enabled=1;
             terminal_length=24; terminal_width=80; terminal_monitor=0;
             terminal_privilege=-1;
         }
@@ -425,6 +426,21 @@ static void management_event(const char *action, const char *line)
         if (strlen(completed) < sizeof(input_line)) {
             strcpy(input_line, completed); input_length = input_cursor = strlen(completed);
         }
+    }
+    /* The management service sends this only on login or a changed line
+     * policy; session-only overrides survive ordinary replies/heartbeats. */
+    if (json_object_object_get_ex(reply,"terminal_settings",&item)) {
+        json_object *value;
+        if(json_object_object_get_ex(item,"length",&value)) {
+            int n=json_object_get_int(value);if(n>=0 && n<=512)terminal_length=(unsigned)n;
+        }
+        if(json_object_object_get_ex(item,"history_size",&value)) {
+            int n=json_object_get_int(value);if(n>=0 && n<=HISTORY_CAPACITY)history_size=(unsigned)n;
+        }
+        if(json_object_object_get_ex(item,"history",&value)) {
+            history_enabled=json_object_get_boolean(value);history_limit(history_enabled?history_size:0);
+        }
+        if(json_object_object_get_ex(item,"editing",&value))editors[0].editing=editors[1].editing=json_object_get_boolean(value);
     }
     if (!filtered && json_object_object_get_ex(reply, "local", &item)) local_display(json_object_get_string(item));
     if(!capturing_output)pager_finish(&output_pager);
@@ -491,9 +507,9 @@ static void local_execute(const char *line)
     if (!strncmp(line,"terminal ",9)) {
         if (!strcmp(line,"terminal editing")) { editors[0].editing=editors[1].editing=1; return; }
         if (!strcmp(line,"terminal no editing")) { editors[0].editing=editors[1].editing=0; return; }
-        if (!strcmp(line,"terminal history")) { history_limit(history_size); return; }
-        if (!strcmp(line,"terminal no history")) { history_limit(0); return; }
-        if (!strcmp(line,"terminal no history size")) { history_size=10; history_limit(10); return; }
+        if (!strcmp(line,"terminal history")) { history_enabled=1; history_limit(history_size); return; }
+        if (!strcmp(line,"terminal no history")) { history_enabled=0; history_limit(0); return; }
+        if (!strcmp(line,"terminal no history size")) { history_enabled=1; history_size=10; history_limit(10); return; }
         if (!strcmp(line,"terminal monitor")) { terminal_monitor=1; return; }
         if (!strcmp(line,"terminal no monitor")) { terminal_monitor=0; return; }
         const char *number=NULL; unsigned minimum=0, maximum=512;
@@ -507,7 +523,7 @@ static void local_execute(const char *line)
             puts("% Invalid terminal setting value."); return;
         }
         *setting=(unsigned)value;
-        if (setting==&editor.history_limit) { history_size=(unsigned)value; history_limit(history_size); }
+        if (setting==&editor.history_limit) { history_enabled=1; history_size=(unsigned)value; history_limit(history_size); }
     } else if (!strcmp(line,"show history")) {
         unsigned count=editor.history_kept;
         if (count>editor.history_limit) count=editor.history_limit;
