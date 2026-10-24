@@ -2,6 +2,15 @@
 #include <ctype.h>
 #include <string.h>
 
+/* Preserve CR until this point so CRLF is one submit, even when a dialog
+ * changes state between the two bytes. Consecutive LF/CR presses stay distinct. */
+int terminal_input_byte(unsigned char *c, int *after_cr) {
+    if (*after_cr && *c=='\n') { *after_cr=0; return 0; }
+    *after_cr=(*c=='\r');
+    if (*after_cr) *c='\n';
+    return 1;
+}
+
 void editor_init(struct line_editor *e) { memset(e,0,sizeof(*e)); e->history_limit=10; }
 void editor_clear(struct line_editor *e) {
     e->line[0]=0; e->length=e->cursor=0; e->overflow=e->escape=e->literal=e->yank_valid=0;

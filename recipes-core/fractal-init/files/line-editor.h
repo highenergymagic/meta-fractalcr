@@ -16,5 +16,6 @@ struct line_editor {
 void editor_init(struct line_editor *e);
 void editor_clear(struct line_editor *e);
 void editor_record(struct line_editor *e);
+int terminal_input_byte(unsigned char *c, int *after_cr);
 enum edit_action editor_feed(struct line_editor *e, unsigned char c);
 #endif

@@ -194,13 +194,13 @@ static void filtered_reply(json_object *reply,json_object *filter)
         if(!end)break;
         line=end+1;
     }
-    if(!strcmp(kind,"count"))printf("%u\n",count);
+    if(!strcmp(kind,"count"))printf("Number of lines which match regexp = %u\n",count);
     free(text);regfree(&regex);
 }
-static void management(const char *line)
+static void management_event(const char *action, const char *line)
 {
-    if (!strncmp(line, "request image pull ", 19)) puts("Receiving container image...");
-    else if (!strcmp(line, "request platform debug service-container enable")) puts("Preparing platform debug service container...");
+    if (!*action && !challenged && !strncmp(line, "request image pull ", 19)) puts("Receiving container image...");
+    else if (!*action && !challenged && !strcmp(line, "request platform debug service-container enable")) puts("Preparing platform debug service container...");
     int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     pid_t recovery=-1;
     struct sockaddr_un address = {.sun_family=AF_UNIX};
@@ -216,13 +216,14 @@ static void management(const char *line)
         recovery=fork();
         if (!recovery) {
             dup2(pipes[1],1); close(pipes[0]); close(pipes[1]);
-            execl("/usr/libexec/fractal-management","fractal-management","recover",line,(char *)NULL);
+            execl("/usr/libexec/fractal-management","fractal-management","recover",action,line,(char *)NULL);
             _exit(127);
         }
         close(pipes[1]); fd=pipes[0];
         if (recovery<0) { close(fd); puts("% Management unavailable; access denied."); return; }
     }
     json_object *request = json_object_new_object();
+    json_object_object_add(request,"action",json_object_new_string(action));
     json_object_object_add(request, "command", json_object_new_string(line));
     if (remote_console) {
         json_object_object_add(request,"transport",json_object_new_string("ssh"));
@@ -286,8 +287,8 @@ static void management(const char *line)
         if (challenged) snprintf(auth_prompt,sizeof(auth_prompt),"%s",p);
         /* An unchanged heartbeat at Username must not erase partially typed
          * input. Reset only when entering login or handling an explicit reply. */
-        if (!strcmp(line,"__connect") ||
-            (!strcmp(p,"Username: ") && (!was_challenged || strcmp(line,"__tick"))) || close_session) {
+        if (!strcmp(action,"connect") ||
+            (!strcmp(p,"Username: ") && (!was_challenged || strcmp(action,"tick"))) || close_session) {
             editor_init(&editor); history_size=10;
             terminal_length=24; terminal_width=80; terminal_monitor=0;
         }
@@ -308,8 +309,9 @@ static void management(const char *line)
     if (!filtered && json_object_object_get_ex(reply, "local", &item)) local_execute(json_object_get_string(item));
     if (json_object_object_get_ex(reply, "argv", &item)) native_execute(item);
     json_object_put(reply);
-    if (!strcmp(line,"__tick") && challenged!=was_challenged) { putchar('\n'); prompt(); }
+    if (!strcmp(action,"tick") && challenged!=was_challenged) { putchar('\n'); prompt(); }
 }
+static void management(const char *line) { management_event("",line); }
 static int snapshot(struct control_reply *reply)
 {
     if (!control_call(CT_LIST, NULL, reply)) return 0;
@@ -502,13 +504,15 @@ int platform_console(void)
     if (gethostname(hostname, sizeof(hostname))) strcpy(hostname, "ctr");
     struct termios term;
     if (tcgetattr(0, &term)) return 1;
-    term.c_lflag &= ~(ICANON | ECHO | ISIG); term.c_iflag |= ICRNL;
+    term.c_lflag &= ~(ICANON | ECHO | ISIG);
+    term.c_iflag &= ~(ICRNL | INLCR | IGNCR);
     term.c_oflag |= OPOST | ONLCR;
     term.c_oflag &= ~(OCRNL | ONOCR | ONLRET);
     term.c_iflag &= ~(IXON | IXOFF | IXANY);
     term.c_cc[VMIN] = 1; term.c_cc[VTIME] = 0;
     if (tcsetattr(0, TCSANOW, &term)) return 1;
     if (!remote_console) service_notify();
+    int input_after_cr=0;
     long long deadline = monotonic_ms() + 3000;
     struct control_reply reply;
     while (!remote_console && monotonic_ms() < deadline) {
@@ -517,7 +521,7 @@ int platform_console(void)
     }
     if (!stat("/run/log/events.log", &st)) { event_inode = st.st_ino; event_offset = st.st_size; }
     editor_init(&editor);
-    management("__connect");
+    management_event("connect","");
     if (close_session) return 0;
     FILE *command_line = fopen("/proc/cmdline", "r");
     if (command_line) {
@@ -538,7 +542,7 @@ int platform_console(void)
             editor_init(&editor);
             puts("\nPress RETURN to get started!");
         }
-        if (connected && monotonic_ms()-tick>=1000) { management("__tick");tick=monotonic_ms(); }
+        if (connected && monotonic_ms()-tick>=1000) { management_event("tick","");tick=monotonic_ms(); }
         events();
         struct pollfd input = {.fd=0, .events=POLLIN};
         if (poll(&input, 1, 100) <= 0) continue;
@@ -549,10 +553,11 @@ int platform_console(void)
         }
         for (ssize_t i = 0; i < count; i++) {
             unsigned char c = chars[i];
+            if (!terminal_input_byte(&c,&input_after_cr)) continue;
             if (!connected) {
                 if (c == '\n' || c == '\r') {
                     connected = 1; putchar('\n');
-                    if (reconnect) { management("__connect"); reconnect=0; }
+                    if (reconnect) { management_event("connect",""); reconnect=0; }
                     if (!close_session) prompt();
                 }
                 continue;
@@ -562,7 +567,7 @@ int platform_console(void)
                     putchar('\n');management(input_line);editor_clear(&editor);prompt();
                 } else if (c==3) {
                     editor_clear(&editor);putchar('\n');
-                    management("__cancel");
+                    management_event("cancel","");
                     prompt();
                 }
                 else if (c==127||c==8) { if(input_length) { input_line[--input_length]=0;input_cursor=input_length;if(!secret_input)fputs("\b \b",stdout); } }
@@ -585,16 +590,16 @@ int platform_console(void)
             case EDIT_HELP: {
                 output_rows=output_column=0; output_aborted=0;
                 char query[2080];
-                snprintf(query,sizeof(query),"__help %.*s",(int)input_cursor,input_line);
-                fputs("?\n",stdout); command_busy=1; management(query); command_busy=0; prompt();
+                snprintf(query,sizeof(query),"%.*s",(int)input_cursor,input_line);
+                fputs("?\n",stdout); command_busy=1; management_event("help",query); command_busy=0; prompt();
                 break;
             }
             case EDIT_COMPLETE: {
                 char query[2080],suffix[2048];
                 strcpy(suffix,input_line+input_cursor);
-                snprintf(query,sizeof(query),"__complete %.*s",(int)input_cursor,input_line);
+                snprintf(query,sizeof(query),"%.*s",(int)input_cursor,input_line);
                 input_line[input_cursor]=0; input_length=input_cursor;
-                command_busy=1; management(query); command_busy=0;
+                command_busy=1; management_event("complete",query); command_busy=0;
                 if (input_length+strlen(suffix)<sizeof(input_line)) {
                     strcat(input_line,suffix); input_length=strlen(input_line);
                 }
@@ -608,7 +613,7 @@ int platform_console(void)
                 editor_clear(&editor); if (!close_session) prompt(); break;
             case EDIT_CANCEL: puts("^C"); prompt(); break;
             case EDIT_END:
-                putchar('\n'); command_busy=1; management("__end"); command_busy=0; prompt(); break;
+                putchar('\n'); command_busy=1; management_event("end",""); command_busy=0; prompt(); break;
             case EDIT_EOF:
                 putchar('\n'); command_busy=1;
                 management(strstr(mode_suffix,"config") ? "exit" : "logout");
