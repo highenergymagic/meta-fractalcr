@@ -5,6 +5,22 @@ SRC_URI = "file://source"
 S = "${UNPACKDIR}/source"
 SOURCE_DATE_EPOCH = "1792454400"
 DEPENDS = "go-native"
+
+# BitBake's offline task namespace starts with lo down. The protocol tests use
+# local TCP/UDP fixtures; enable only loopback before the task exec drops the
+# namespace capabilities. Do not grant do_compile external network access.
+python fractal_test_loopback() {
+    import fcntl
+    import socket
+    import struct
+
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        flags = fcntl.ioctl(sock.fileno(), 0x8913, struct.pack("16sH", b"lo", 0))
+    if not (struct.unpack_from("H", flags, 16)[0] & 1):
+        bb.utils.enable_loopback_networking()
+}
+do_compile[prefuncs] += "fractal_test_loopback"
+
 do_compile() {
     export GOOS=linux GOARCH=amd64 CGO_ENABLED=0
     export GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off
