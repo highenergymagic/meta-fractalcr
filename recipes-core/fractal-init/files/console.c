@@ -9,12 +9,17 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <json-c/json.h>
+#include <linux/ethtool.h>
+#include <linux/fs.h>
+#include <linux/sockios.h>
+#include <net/if.h>
 #include <poll.h>
 #include <regex.h>
 #include <pty.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/statfs.h>
@@ -68,6 +73,111 @@ static size_t view_start;
 static off_t event_offset;
 static ino_t event_inode;
 static void local_execute(const char *line);
+
+/* Prefer supported link modes: the negotiated speed disappears on down ports. */
+static unsigned interface_capacity(const char *name)
+{
+    unsigned speed=0;
+    size_t name_length=strlen(name);
+    if (name_length>=IFNAMSIZ) return 0;
+    int socket_fd=socket(AF_INET,SOCK_DGRAM|SOCK_CLOEXEC,0);
+    if (socket_fd>=0) {
+        struct ethtool_cmd link={.cmd=ETHTOOL_GSET};
+        struct ifreq request={0};
+        memcpy(request.ifr_name,name,name_length+1);
+        request.ifr_data=(char *)&link;
+        if (!ioctl(socket_fd,SIOCETHTOOL,&request)) {
+            uint32_t modes=link.supported;
+            if (modes & SUPPORTED_10000baseT_Full) speed=10000;
+            else if (modes & (SUPPORTED_1000baseT_Full|SUPPORTED_1000baseT_Half)) speed=1000;
+            else if (modes & (SUPPORTED_100baseT_Full|SUPPORTED_100baseT_Half)) speed=100;
+            else if (modes & (SUPPORTED_10baseT_Full|SUPPORTED_10baseT_Half)) speed=10;
+        }
+        close(socket_fd);
+    }
+    char path[256];
+    if (snprintf(path,sizeof(path),"/sys/class/net/%s/speed",name)>=(int)sizeof(path)) return speed;
+    FILE *file=fopen(path,"r");
+    if (file) {
+        unsigned negotiated;
+        if (fscanf(file,"%u",&negotiated)==1 && negotiated>speed && negotiated<=400000)
+            speed=negotiated;
+        fclose(file);
+    }
+    return speed;
+}
+
+static void print_interface_summary(void)
+{
+    static const char *const classes[]={"Ethernet (speed unavailable)","Ethernet","Fast Ethernet",
+        "Gigabit Ethernet","2.5 Gigabit Ethernet","5 Gigabit Ethernet","Ten Gigabit Ethernet",
+        "TwentyFive Gigabit Ethernet","Forty Gigabit Ethernet","Fifty Gigabit Ethernet",
+        "Hundred Gigabit Ethernet","TwoHundred Gigabit Ethernet","FourHundred Gigabit Ethernet"};
+    unsigned counts[sizeof(classes)/sizeof(classes[0])]={0},total=0;
+    DIR *network=opendir("/sys/class/net");
+    if (!network) return;
+    struct dirent *entry;
+    while ((entry=readdir(network))) {
+        if (entry->d_name[0]=='.') continue;
+        char device[256];
+        if (snprintf(device,sizeof(device),"/sys/class/net/%s/device",entry->d_name)>=(int)sizeof(device) ||
+            access(device,F_OK)) continue;
+        unsigned speed=interface_capacity(entry->d_name),class=0;
+        if (speed>200000) class=12;
+        else if (speed>100000) class=11;
+        else if (speed>50000) class=10;
+        else if (speed>40000) class=9;
+        else if (speed>25000) class=8;
+        else if (speed>10000) class=7;
+        else if (speed>5000) class=6;
+        else if (speed>2500) class=5;
+        else if (speed>1000) class=4;
+        else if (speed>100) class=3;
+        else if (speed>10) class=2;
+        else if (speed>0) class=1;
+        counts[class]++;total++;
+    }
+    closedir(network);
+    if (!total) { puts("0 physical network interfaces"); return; }
+    for (unsigned i=0;i<sizeof(counts)/sizeof(counts[0]);i++)
+        if (counts[i]) printf("%u %s interface%s\n",counts[i],classes[i],counts[i]==1?"":"s");
+}
+
+/* The serial console may not share the management service's mount namespace. */
+static unsigned long long bootflash_capacity_kb(void)
+{
+    struct statfs mounted;
+    if (!statfs("/run/filesystems/bootflash",&mounted) &&
+        (unsigned long)mounted.f_type==0x4d44UL && mounted.f_blocks)
+        return (unsigned long long)mounted.f_blocks*mounted.f_bsize/1024;
+    DIR *disks=opendir("/sys/class/block");
+    if (!disks) return 0;
+    unsigned long long result=0;
+    struct dirent *entry;
+    while ((entry=readdir(disks))) {
+        if (entry->d_name[0]=='.') continue;
+        char path[256];
+        if (snprintf(path,sizeof(path),"/dev/%s",entry->d_name)>=(int)sizeof(path)) continue;
+        int fd=open(path,O_RDONLY|O_NONBLOCK|O_CLOEXEC|O_NOFOLLOW);
+        struct stat device;
+        unsigned char sector[512];
+        if (fd<0) continue;
+        int valid=!fstat(fd,&device) && S_ISBLK(device.st_mode) &&
+            pread(fd,sector,sizeof(sector),0)==(ssize_t)sizeof(sector) &&
+            sector[510]==0x55 && sector[511]==0xaa;
+        unsigned offset=0;
+        if (valid && !memcmp(sector+82,"FAT32   ",8)) offset=71;
+        else if (valid && !memcmp(sector+54,"FAT16   ",8)) offset=43;
+        if (offset && !memcmp(sector+offset,"FRFLASH    ",11)) {
+            unsigned long long bytes=0;
+            if (!ioctl(fd,BLKGETSIZE64,&bytes)) result=bytes/1024;
+        }
+        close(fd);
+        if (result) break;
+    }
+    closedir(disks);
+    return result;
+}
 static void management_event(const char *action, const char *line);
 static int output_key(void *context)
 {
@@ -569,26 +679,10 @@ static void local_execute(const char *line)
         struct sysinfo information;
         if (!sysinfo(&information)) printf("%s uptime is %ld days, %ld hours, %ld minutes\n",hostname,information.uptime/86400,information.uptime/3600%24,information.uptime/60%60);
         puts("Last reload reason: Not recorded\n");
-        platform_inventory(1);
-        unsigned interfaces=0;
-        DIR *network=opendir("/sys/class/net");
-        if (network) {
-            struct dirent *entry;
-            while ((entry=readdir(network))) {
-                char device[512];
-                snprintf(device,sizeof(device),"/sys/class/net/%s/device",entry->d_name);
-                if (!access(device,F_OK)) interfaces++;
-            }
-            closedir(network);
-            printf("%u physical network interface%s\n",interfaces,interfaces==1?"":"s");
-        }
-        const char *mounts[]={"/run/filesystems/bootflash","/datastore/data0"};
-        const char *labels[]={"bootflash:","data0:"};
-        for (unsigned i=0;i<2;i++) {
-            struct statfs fs;
-            if (!statfs(mounts[i],&fs) && (unsigned long)fs.f_type==(i?0x9123683eUL:0x4d44UL))
-                printf("%lluK bytes of %s storage (%lluK bytes available)\n",(unsigned long long)fs.f_blocks*fs.f_bsize/1024,labels[i],(unsigned long long)fs.f_bavail*fs.f_bsize/1024);
-        }
+        platform_inventory(2);
+        print_interface_summary();
+        unsigned long long flash_kb=bootflash_capacity_kb();
+        if (flash_kb) printf("%lluK bytes of flash memory at bootflash:.\n",flash_kb);
         printf("Configuration register is %s\n",ignored_startup?"0x2142":"0x2102");
         FILE *identity=fopen("/etc/fractal/build-id","r");
         if (identity) {
