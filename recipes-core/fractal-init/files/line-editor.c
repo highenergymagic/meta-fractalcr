@@ -52,12 +52,14 @@ static enum edit_action recall(struct line_editor *e, int older) {
 static enum edit_action yank(struct line_editor *e, int older) {
     unsigned available=e->kill_count<10 ? e->kill_count : 10;
     if (!available || (older && !e->yank_valid)) return EDIT_BELL;
-    if (older) {
-        erase(e,e->yank_start,e->yank_start+e->yank_length,0);
-        e->kill_back=(e->kill_back+1)%available;
-    } else e->kill_back=0;
-    const char *text=e->kills[(e->kill_count-1-e->kill_back)%10]; size_t n=strlen(text);
-    if (e->length+n>=LINE_CAPACITY) return EDIT_BELL;
+    unsigned back=older ? (e->kill_back+1)%available : 0;
+    const char *text=e->kills[(e->kill_count-1-back)%10]; size_t n=strlen(text);
+    /* Validate the replacement before removing the previous yank. A rejected
+     * replacement must preserve its range and the selected kill-ring entry. */
+    size_t replaced=older ? e->yank_length : 0;
+    if (e->length-replaced+n>=LINE_CAPACITY) return EDIT_BELL;
+    if (older) erase(e,e->yank_start,e->yank_start+e->yank_length,0);
+    e->kill_back=back;
     memmove(e->line+e->cursor+n,e->line+e->cursor,e->length-e->cursor+1);
     memcpy(e->line+e->cursor,text,n); e->yank_start=e->cursor; e->yank_length=n;
     e->length+=n; e->cursor+=n; e->yank_valid=1;
