@@ -11,12 +11,13 @@ SRC_URI = "https://cdn.kernel.org/pub/linux/kernel/projects/cip/6.12/linux-cip-$
            file://defconfig file://firmware.crt \
            file://patch-6.12.112-113.patch.gz \
            file://patch-6.12.113-114.patch.gz \
+           file://CVE-2026-31692-peer-netns.patch \
            file://kernel-security.json"
 SRC_URI[sha256sum] = "522caf8dd5a07904705691ba07440d8a557d74eab39a938b95b0c69ad27eed3a"
 S = "${UNPACKDIR}/linux-cip-${PV}"
 COMPATIBLE_MACHINE = "fractal-x86-64"
 KERNEL_VERSION_SANITY_SKIP = "1"
-KERNEL_LOCALVERSION = "-security1-fractalcr"
+KERNEL_LOCALVERSION = "-security2-fractalcr"
 KERNEL_FEATURES = ""
 KERNEL_EXTRA_ARGS += "LOADADDR="
 ERROR_QA:append = " patch-fuzz"
@@ -44,16 +45,17 @@ python do_unpack:append() {
     manifest = json.loads((root/'kernel-security.json').read_text())
     if manifest['base'] != d.getVar('PV'):
         bb.fatal('Kernel security updates do not match CIP source version')
-    for entry in manifest['patches']:
+    for entry in manifest['patches'] + manifest.get('backports', []):
         if Path(entry['file']).name != entry['file']:
             bb.fatal('Invalid kernel security patch filename')
-        # OE decompresses local .gz inputs during unpack. Verify the exact
-        # decompressed patch against the original layer file's authenticated hash.
+        # OE decompresses local .gz inputs during unpack. Verify the unpacked
+        # patch against the original layer file's authenticated hash.
         packed = Path(d.getVar('FCR_KERNEL_SECURITY_DIR'))/entry['file']
         data = packed.read_bytes()
         if hashlib.sha256(data).hexdigest() != entry['sha256']:
             bb.fatal('Kernel security patch checksum mismatch')
-        if (root/entry['file'].removesuffix('.gz')).read_bytes() != gzip.decompress(data):
+        expected = gzip.decompress(data) if entry['file'].endswith('.gz') else data
+        if (root/entry['file'].removesuffix('.gz')).read_bytes() != expected:
             bb.fatal('Unpacked kernel security patch differs from reviewed input')
 }
 do_configure:prepend() {
