@@ -11,7 +11,8 @@ IMAGE_LINGUAS = ""
 PACKAGE_INSTALL = "base-files base-passwd glibc ca-certificates \
     fractal-init busybox docker-moby containerd runc iptables iptables-modules iproute2 \
     fractal-storage fractal-kata fractal-container-tools fractal-blockstore \
-    os-release git openssh-ssh openssh-scp openssh-sftp chrony"
+    os-release git openssh-ssh openssh-scp openssh-sftp chrony \
+    linux-firmware-tg3 linux-firmware-bnx2 linux-firmware-bnx2x linux-firmware-isci"
 IMAGE_ROOTFS_EXTRA_SPACE = "0"
 IMAGE_ROOTFS_SIZE = "0"
 IMAGE_OVERHEAD_FACTOR = "1.0"
